@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://youtu.be/DX7ayRiIjKo">
-    <img src="https://img.youtube.com/vi/DX7ayRiIjKo/maxresdefault.jpg" alt="PoloX AI 演示视频" width="720" />
+    <img src="public/brand/polox-demo-youtube.jpg" alt="PoloX AI 演示视频 — 点击播放" width="720" />
   </a>
 </p>
 
