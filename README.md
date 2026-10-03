@@ -5,6 +5,10 @@
 <h1 align="center">PoloX AI — Agent-Powered Multimodal Creation Workbench</h1>
 
 <p align="center">
+  <strong>Watch the video intro 👇</strong>
+</p>
+
+<p align="center">
   <a href="https://youtu.be/DX7ayRiIjKo">
     <img src="public/brand/polox-demo-youtube.jpg" alt="PoloX AI demo video — click to play" width="720" />
   </a>

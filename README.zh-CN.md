@@ -5,6 +5,10 @@
 <h1 align="center">PoloX AI — Agent 驱动的多模态生成工作台</h1>
 
 <p align="center">
+  <strong>查看视频介绍 👇</strong>
+</p>
+
+<p align="center">
   <a href="https://youtu.be/DX7ayRiIjKo">
     <img src="public/brand/polox-demo-youtube.jpg" alt="PoloX AI 演示视频 — 点击播放" width="720" />
   </a>
