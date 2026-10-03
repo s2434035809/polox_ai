@@ -10,6 +10,8 @@ import { assetName, matchingAgentAsset } from '~~/shared/utils/assetName'
 import { isImageLayerSplitterModel } from '~~/shared/utils/imageLayerSplitter'
 import { isMediaAudioUrl, isMediaDocumentUrl, isMediaVideoUrl, mediaDocumentLabel } from '~~/shared/utils/seedance25'
 import { canUseAsSkillCover } from '~~/shared/utils/skillCover'
+import { ARRANGE_CELL_HEIGHT, ARRANGE_CELL_WIDTH, arrangeCanvasItems } from '~~/shared/utils/canvasArrange'
+import type { CanvasArrangeOrder } from '~~/shared/utils/canvasArrange'
 import { byCanvasOrder, CARD_CHROME_HEIGHT, CARD_HEIGHT, CARD_WIDTH, CELL_X, CELL_Y, clampZoom, findFreeRect, fitMediaRect, intersectsSelection, inViewport, isDefaultCanvasGrid, latestCanvasAsset, MAX_PLAYING_VIDEOS, MAX_VISIBLE, resizeFromCorner, snapCanvasRect, zoomAt } from '~/utils/infiniteCanvas'
 import { toast } from 'vue-sonner'
 import AgentLabAssetDragGhost from '~/components/agent-lab/AgentLabAssetDragGhost.vue'
@@ -57,6 +59,9 @@ interface Asset {
   completedAt?: string
   id: string
   taskId?: string
+  batchId?: string
+  resultIndex?: number
+  sourceUrls?: string[]
   url: string
   prompt: string
   name: string
@@ -69,6 +74,26 @@ interface Asset {
   job?: GenerationJobPublic
 }
 const { positions, camera, nextSlot, ready, loadError, markNode, markView, ensure, flush, hideNode } = useCanvasLayout(props.projectId)
+const arrangeOrder = ref<CanvasArrangeOrder>('oldest')
+const arrangeMenuOpen = ref(false)
+const arrangingTransition = ref(false)
+const arrangedMode = ref(false)
+let arrangeTimer: ReturnType<typeof setTimeout> | undefined
+const arrangeOptions: { value: CanvasArrangeOrder, label: string }[] = [
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'newest', label: 'Newest first' },
+  { value: 'type', label: 'By type: stills, videos, other' },
+]
+const arrangeDescription = computed(() => arrangeOrder.value === 'type'
+  ? 'Arrange by type (stills, videos, other), then creation time · batches stay together'
+  : `Arrange by creation time (${arrangeOrder.value === 'oldest' ? 'oldest first' : 'newest first'}) · batches stay together`)
+function inputSourceUrls(input: Record<string, unknown>): string[] {
+  const keys = ['sourceUrl', 'source_url', 'image_url', 'imageUrl', 'inputUrls', 'input_urls', 'image_urls', 'image_input', 'reference_image_urls', 'first_frame_url', 'start_image_url']
+  return keys.flatMap((key) => {
+    const value = input[key]
+    return typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((url): url is string => typeof url === 'string') : []
+  })
+}
 const sourceAssets = computed(() => {
   const result: Asset[] = []
   const urls = new Set<string>()
@@ -83,7 +108,7 @@ const sourceAssets = computed(() => {
       const layerResult = isImageLayerSplitterModel(job.model)
       const prompt = layerResult ? '' : job.prompt
       const layerName = job.layers?.[index]?.name || (index === 0 ? 'Background' : `Layer ${index}`)
-      result.push({ id: `${job.taskId}:${index}`, taskId: job.taskId, createdAt: job.createdAt, completedAt: job.completedAt, job, url, name: layerResult ? layerName : assetName({ id: `${job.taskId}:${index}`, prompt: job.prompt, name: String(job.input.asset_name || matchingAgentAsset(props.images, job.taskId, url)?.name || ''), kind: job.category === 'Video' ? 'video' : 'still', videoMode: String(job.input.videoMode || '') }), prompt, video: job.category === 'Video' || isMediaVideoUrl(url), audio: isMediaAudioUrl(url), document: !isMediaAudioUrl(url) && !(job.category === 'Video' || isMediaVideoUrl(url)) && isMediaDocumentUrl(url), cutout: /remove.?background|cutout/i.test(job.task), state: job.state, error: job.failMsg })
+      result.push({ id: `${job.taskId}:${index}`, taskId: job.taskId, resultIndex: index, sourceUrls: inputSourceUrls(job.input), createdAt: job.createdAt, completedAt: job.completedAt, job, url, name: layerResult ? layerName : assetName({ id: `${job.taskId}:${index}`, prompt: job.prompt, name: String(job.input.asset_name || matchingAgentAsset(props.images, job.taskId, url)?.name || ''), kind: job.category === 'Video' ? 'video' : 'still', videoMode: String(job.input.videoMode || '') }), prompt, video: job.category === 'Video' || isMediaVideoUrl(url), audio: isMediaAudioUrl(url), document: !isMediaAudioUrl(url) && !(job.category === 'Video' || isMediaVideoUrl(url)) && isMediaDocumentUrl(url), cutout: /remove.?background|cutout/i.test(job.task), state: job.state, error: job.failMsg })
     }
   }
   for (const url of urls)
@@ -104,7 +129,7 @@ const sourceAssets = computed(() => {
     }
     if (taskIds.has(persistedId) || taskIds.has(item.providerTaskId || item.id))
       continue
-    result.push({ id: `${persistedId}:0`, taskId: item.providerTaskId || undefined, url: item.url, name: assetName(item), prompt: item.prompt, video: item.kind === 'video' || isMediaVideoUrl(item.url), audio: item.kind === 'audio' || isMediaAudioUrl(item.url), document: item.kind === 'document' || (!((item.kind === 'audio') || isMediaAudioUrl(item.url)) && item.kind !== 'video' && (isMediaDocumentUrl(item.url || '') || /\.(pdf|docx?|pptx?|xlsx?|csv)$/i.test(item.name || ''))), cutout: item.kind === 'cutout', state: item.status, error: item.error })
+    result.push({ id: `${persistedId}:0`, taskId: item.providerTaskId || undefined, batchId: item.providerTaskId, sourceUrls: [...(item.sourceUrl ? [item.sourceUrl] : []), ...(item.inputUrls || [])], url: item.url, name: assetName(item), prompt: item.prompt, video: item.kind === 'video' || isMediaVideoUrl(item.url), audio: item.kind === 'audio' || isMediaAudioUrl(item.url), document: item.kind === 'document' || (!((item.kind === 'audio') || isMediaAudioUrl(item.url)) && item.kind !== 'video' && (isMediaDocumentUrl(item.url || '') || /\.(pdf|docx?|pptx?|xlsx?|csv)$/i.test(item.name || ''))), cutout: item.kind === 'cutout', state: item.status, error: item.error })
   }
   return result
 })
@@ -293,6 +318,8 @@ function uploadToCanvas(files: File[], layout: (count: number, occupied: CanvasR
   void props.uploadFiles(files, {
     accepted(accepted) {
       const rects = layout(accepted.length, occupiedRects())
+      // A drop or picker upload is a manual placement: keep it instead of re-running auto arrange.
+      arrangedMode.value = false
       const added = accepted.map((file, index) => ({ id: crypto.randomUUID(), name: file.name, rect: rects[index]! }))
       added.forEach((item, index) => slots.set(accepted[index]!, item))
       uploadPlaceholders.value = [...uploadPlaceholders.value, ...added]
@@ -356,6 +383,7 @@ function placeLibraryAsset(asset: AssetLibraryAssetPublic, client: { x: number, 
     : layoutCenteredFiles(viewportCenterPoint(), 1, occupied)
   if (!slot)
     return
+  arrangedMode.value = false
   reservedDropPositions.set(asset.url, slot)
   void props.addUrls([{ url: asset.url, name: asset.name, kind: asset.kind }], {
     beforeInsert(image) {
@@ -399,6 +427,17 @@ function reconcile() {
     const rect = next.get(asset.id)
     return rect ? [rect] : []
   })
+  if (!arrangedMode.value && occupied.length && occupied.every(rect => rect.width === ARRANGE_CELL_WIDTH && rect.height === ARRANGE_CELL_HEIGHT)) {
+    const existing = assets.value.flatMap(asset => {
+      const rect = next.get(asset.id)
+      return rect ? [{ ...asset, taskId: asset.taskId || asset.batchId, rect }] : []
+    })
+    const candidate = arrangeCanvasItems(existing, arrangeOrder.value)
+    arrangedMode.value = existing.every(item => {
+      const expected = candidate.get(item.id)
+      return expected?.x === item.rect.x && expected.y === item.rect.y
+    })
+  }
   // Repair the old name-sorted grid only when every card is already loaded and
   // creation dates establish the order. Never include newly arriving cards in
   // this repair, or infer chronology from random IDs on legacy assets.
@@ -433,6 +472,17 @@ function reconcile() {
       }
     }
   }
+  if (added.length && arrangedMode.value) {
+    const arranged = arrangeCanvasItems(assets.value.flatMap(asset => {
+      const rect = next.get(asset.id)
+      return rect ? [{ ...asset, taskId: asset.taskId || asset.batchId, rect }] : []
+    }), arrangeOrder.value)
+    for (const [id, rect] of arranged) {
+      next.set(id, rect)
+      if (!added.includes(id)) added.push(id)
+    }
+    nextSlot.value = assets.value.length
+  }
   // Bound retained layouts across history windows, without dropping any server results.
   if (next.size > 1000) {
     const active = new Set(assets.value.map(item => item.id))
@@ -461,6 +511,9 @@ watch(() => JSON.stringify(assets.value.map(item => [item.id, item.name])), asyn
 function fitAsset(id: string, size: { width: number, height: number }) {
   const rect = positions.value.get(id)
   if (!rect)
+    return
+  // Arranged cells letterbox through object-contain; metadata must not reflow them.
+  if (rect.width === ARRANGE_CELL_WIDTH && rect.height === ARRANGE_CELL_HEIGHT)
     return
   let fitted = fitMediaRect(rect, size.width, size.height)
   if (Math.abs(fitted.height - rect.height) < 0.01)
@@ -512,6 +565,12 @@ async function focusMedia(url: string) {
 }
 defineExpose({ focusMedia, hideAsset: hideNode })
 onMounted(async () => {
+  try {
+    const savedOrder = localStorage.getItem(`canvas-arrange-order:${props.projectId}`)
+    if (savedOrder === 'oldest' || savedOrder === 'newest' || savedOrder === 'type')
+      arrangeOrder.value = savedOrder
+  }
+  catch { /* Canvas layout still works when browser storage is unavailable. */ }
   observerReady = true
   await loadLayout()
 })
@@ -564,29 +623,32 @@ function fit() {
   Object.assign(camera, { x: (width.value - (right - left) * scale) / 2 - left * scale, y: (height.value - (bottom - top) * scale) / 2 - top * scale, zoom: scale })
   persist()
 }
-function arrange() {
-  let x = 0
-  let y = 0
-  let rowHeight = 0
+function arrange(order: CanvasArrangeOrder = arrangeOrder.value) {
+  if (props.readOnly) return
+  arrangeOrder.value = order
+  try { localStorage.setItem(`canvas-arrange-order:${props.projectId}`, order) }
+  catch { /* Coordinates still persist through useCanvasLayout. */ }
+  arrangeMenuOpen.value = false
+  arrangedMode.value = true
+  arrangingTransition.value = true
+  clearTimeout(arrangeTimer)
   const next = new Map(positions.value)
-  for (const [index, item] of assets.value.entries()) {
+  const items = assets.value.flatMap((item) => {
     const rect = positions.value.get(item.id)
-    if (!rect)
-      continue
-    if (index > 0 && index % 5 === 0) {
-      x = 0
-      y += rowHeight + 40
-      rowHeight = 0
-    }
-    next.set(item.id, { ...rect, x, y })
-    x += rect.width + 40
-    rowHeight = Math.max(rowHeight, rect.height)
-  }
+    return rect ? [{ ...item, taskId: item.taskId || item.batchId, rect }] : []
+  })
+  for (const [id, rect] of arrangeCanvasItems(items, order))
+    next.set(id, rect)
   positions.value = next
   for (const item of assets.value)
     markNode(item.id)
   nextSlot.value = assets.value.length
   fit()
+  arrangeTimer = setTimeout(() => { arrangingTransition.value = false }, 350)
+}
+function selectArrangeOrder(value: string) {
+  if (value === 'oldest' || value === 'newest' || value === 'type')
+    arrange(value)
 }
 function down(event: PointerEvent, id?: string) {
   if (!ready.value || loadError.value)
@@ -657,6 +719,7 @@ function resizeKey(event: KeyboardEvent, id: string, corner: CanvasCorner) {
     return
   event.preventDefault()
   event.stopPropagation()
+  arrangedMode.value = false
   positions.value = new Map(positions.value).set(id, resizeFromCorner(positions.value.get(id)!, corner, ...shift))
   markNode(id)
 }
@@ -673,6 +736,7 @@ function applyMove() {
     return
   }
   if (resize && pendingMove) {
+    arrangedMode.value = false
     const rect = resizeFromCorner(resize.origin, resize.corner, (pendingMove.x - resize.x) / camera.zoom, (pendingMove.y - resize.y) / camera.zoom)
     positions.value = new Map(positions.value).set(resize.id, rect)
     interacting.value = true
@@ -698,6 +762,7 @@ function applyMove() {
     return
   }
   if (drag.id) {
+    arrangedMode.value = false
     const proposed = { ...positions.value.get(drag.id)!, x: drag.origin.x + dx / camera.zoom, y: drag.origin.y + dy / camera.zoom }
     const targets = visible.value.filter(asset => asset.id !== drag!.id).map(asset => asset.point)
     const snapped = snapCanvasRect(proposed, targets, camera.zoom)
@@ -859,6 +924,7 @@ function view(asset: Asset) {
   open({ url: asset.url, kind: asset.video ? 'video' : 'image', alt: asset.prompt || asset.name, cutout: asset.cutout })
 }
 onBeforeUnmount(() => {
+  clearTimeout(arrangeTimer)
   clearTimeout(wheelTimer)
   cancelAnimationFrame(frame)
   end()
@@ -878,11 +944,12 @@ onBeforeUnmount(() => {
       @pointerdown="down($event)" @pointermove="move" @pointerup="end($event)" @pointercancel="end()" @lostpointercapture="end"
       @wheel.prevent="wheel" @keydown="keydown" @keyup="space = false" @blur="space = false"
     >
-      <div class="absolute origin-top-left" :style="{ 'transform': `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`, '--canvas-selection-width': selectionWidth }">
+      <div class="absolute origin-top-left" :class="arrangingTransition && 'canvas-arrange-motion'" :style="{ 'transform': `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`, '--canvas-selection-width': selectionWidth }">
         <article
           v-for="asset in visible" :key="asset.id"
           class="absolute rounded-xl border"
           :class="[
+            arrangingTransition && 'canvas-arrange-motion',
             asset.url && asset.state === 'success' && !asset.video && !asset.audio && !asset.document ? 'bg-transparent' : 'bg-card shadow-sm',
             asset.state === 'fail' ? 'border-destructive' : selection.has(asset.id) ? 'border-ring' : isGenerationActive(asset.state) ? 'border-primary/70' : 'border-border',
             selection.has(asset.id) && 'canvas-selected',
@@ -1114,9 +1181,30 @@ onBeforeUnmount(() => {
           <button class="canvas-tool canvas-tab" :data-active="hand" aria-label="Pan canvas" :aria-pressed="hand" @click="hand = true">
             <Icon name="i-lucide-hand" />
           </button>
-          <button class="canvas-tool canvas-tab" aria-label="Arrange objects by creation order" title="Arrange: oldest first, newest last" @click="arrange">
-            <Icon name="i-lucide-layout-grid" />
-          </button>
+          <!-- Arrange: the grid button itself opens the menu (Reka trigger: aria-haspopup/aria-expanded, Enter/Space/ArrowDown, Esc + click-outside close). -->
+          <DropdownMenu v-if="!readOnly" v-model:open="arrangeMenuOpen" :modal="false">
+            <DropdownMenuTrigger as-child>
+              <button class="canvas-tool canvas-tab" :data-active="arrangeMenuOpen" data-testid="canvas-arrange-button" aria-label="Arrange canvas" :title="arrangeDescription">
+                <Icon name="i-lucide-layout-grid" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="top" align="start" :collision-padding="8" aria-label="Arrange canvas" class="z-[110] w-52 max-w-[calc(100vw-2rem)] text-xs">
+              <DropdownMenuItem data-testid="canvas-arrange-now" class="text-xs" @select="arrange()">
+                <Icon name="i-lucide-layout-grid" class="size-3.5" />
+                Arrange now
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel class="px-2 py-1 text-[10px] font-normal text-muted-foreground">
+                Order
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup :model-value="arrangeOrder" @update:model-value="selectArrangeOrder">
+                <DropdownMenuRadioItem v-for="option in arrangeOptions" :key="option.value" :value="option.value" :data-testid="`canvas-arrange-${option.value}`" role="menuitemradio" :aria-checked="arrangeOrder === option.value" class="text-xs">
+                  {{ option.label }}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <p class="border-t border-border px-2 pt-2 pb-1 text-[10px] text-muted-foreground">By creation time · batches stay together</p>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <template v-if="fileDropEnabled || libraryEnabled">
             <span class="canvas-tab-divider" aria-hidden="true" />
             <button v-if="fileDropEnabled" class="canvas-tool canvas-tab" data-testid="canvas-upload-button" aria-label="Upload files to the canvas" title="Upload files" :disabled="!acceptsFileDrop" @click="openUploadPicker">
@@ -1191,4 +1279,6 @@ onBeforeUnmount(() => {
 .canvas-tab[data-active="true"] { background: var(--primary); color: var(--primary-foreground); }
 .canvas-tab[data-active="true"]:hover { background: color-mix(in oklab, var(--primary) 90%, black); color: var(--primary-foreground); }
 .canvas-tab-divider { width: 3px; align-self: stretch; background: var(--border); }
+.canvas-arrange-motion { transition: transform 300ms ease, width 300ms ease, height 300ms ease; }
+@media (prefers-reduced-motion: reduce) { .canvas-arrange-motion { transition: none; } }
 </style>

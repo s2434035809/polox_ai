@@ -170,12 +170,13 @@ test('reconcile appends new groups below saved cards without reordering existing
   const { default: ts } = await import('typescript')
   const { parse } = await import('vue/compiler-sfc')
   const utils = await import('../app/utils/infiniteCanvas.ts')
+  const arrange = await import('../shared/utils/canvasArrange.ts')
   const file = readFileSync(new URL('../app/components/agent-lab/InfiniteCanvas.vue', import.meta.url), 'utf8')
   const source = ts.createSourceFile('canvas.ts', parse(file).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
   const fn = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'reconcile')
   const saved = []
   const state = {
-    ...utils, ready: { value: true }, assets: { value: [{ id: 'shot1' }, { id: 'shot2' }] },
+    ...utils, ...arrange, arrangedMode: { value: false }, arrangeOrder: { value: 'oldest' }, ready: { value: true }, assets: { value: [{ id: 'shot1' }, { id: 'shot2' }] },
     positions: { value: new Map([
       ['shot2', { x: 0, y: 0, width: 280, height: 158 }],
       ['shot1', { x: 320, y: 0, width: 280, height: 158 }],

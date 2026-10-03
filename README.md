@@ -54,7 +54,9 @@ PoloX runs locally with Nuxt, Vue, and SQLite. Bring your own [WaveSpeed](https:
 
 8. **Hidden tabs** — in-flight agent requests stop when the page is hidden and can resume when you return.
 
-9. **Left out on purpose** — this open-source release does not include hosted billing, subscriptions, or marketing/SEO pages. Generation still uses your own WaveSpeed key.
+9. **Canvas arrange** — the canvas grid button opens an arrange menu. Arrange now lays cards out in a fixed horizontal grid (ten columns, uniform cells, batches kept together). Order can be oldest first, newest first, or by type (stills, then videos, then other). The chosen order is remembered per project. New results keep that order until you move, resize, or drop a card by hand.
+
+10. **Left out on purpose** — this open-source release does not include hosted billing, subscriptions, or marketing/SEO pages. Generation still uses your own WaveSpeed key.
 
 ### September 26, 2026 — v2.1.0
 
