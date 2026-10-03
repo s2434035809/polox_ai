@@ -15,6 +15,7 @@ import { readErrorMessage } from '~~/shared/utils/apiError'
 import ProjectMoveJobDialog from '@/components/projects/ProjectMoveJobDialog.vue'
 import AssetLibraryImportDialog from '@/components/asset-libraries/AssetLibraryImportDialog.vue'
 import { canvasMediaNavigationKey } from '~/composables/useCanvasMediaNavigation'
+import { onPagePause, onPageResume } from '~/utils/pageLifecycle'
 
 const canvas = ref<{ focusMedia: (url: string) => Promise<boolean>, hideAsset: (id: string) => Promise<void> } | null>(null)
 const chat = ref<{ mentionModel: (id: string) => Promise<void> | void, mentionSkill: (id: string) => Promise<void> | void } | null>(null)
@@ -52,13 +53,17 @@ const {
   error: agentError,
   sendMessage,
   stopAgent,
+  cancelChoice,
   stopping,
   attachFiles,
+  uploadCanvasFiles,
+  addCanvasUrls,
   uploadAnnotationImage,
   attachUrls,
   removeAttachment,
   resolveConfirmation,
   resolveChoice,
+  retryInterruptedTurn,
   qualityPreference,
   confirmPolicy,
   agents,
@@ -1116,6 +1121,8 @@ async function saveRename() {
 onBeforeUnmount(() => {
   loadToken++
   jobsController?.abort()
+  stopPagePause?.()
+  stopPageResume?.()
 })
 
 watch(projectId, () => {
@@ -1133,6 +1140,22 @@ useIntervalFn(() => {
     return
   void loadJobs(true)
 }, POLL_MS)
+
+let lastFocusResync = 0
+function resyncOnFocus() {
+  if (document.hidden)
+    return
+  if (Date.now() - lastFocusResync < 500)
+    return
+  lastFocusResync = Date.now()
+  void loadJobs(true)
+}
+const stopPagePause = import.meta.client
+  ? onPagePause(() => jobsController?.abort())
+  : undefined
+const stopPageResume = import.meta.client
+  ? onPageResume(resyncOnFocus)
+  : undefined
 
 watch(items, (jobs) => {
   applyCanvasJobs(jobs)
@@ -1366,6 +1389,8 @@ async function onRemoveObjectCanvas(payload: { urls: string[], prompt: string })
               @cancel="resolveConfirmation('cancel')"
               @submit-choice="resolveChoice('submit', $event)"
               @skip-choice="resolveChoice('skip')"
+              @cancel-choice="cancelChoice"
+              @retry="retryInterruptedTurn"
               @create-agent="onCreateSkillTestAgent"
               @select-agent="onSelectSkillTestAgent"
             />
@@ -1399,6 +1424,8 @@ async function onRemoveObjectCanvas(payload: { urls: string[], prompt: string })
               :deleting-task-id="deletingTaskId"
               :show-move="true"
               show-attach
+              :upload-files="uploadCanvasFiles"
+              :add-urls="addCanvasUrls"
               :show-set-cover="skillTestMode && Boolean(boundSkillId)"
               :setting-cover-url="settingSkillCoverUrl"
               @set-cover="onSetSkillCover"

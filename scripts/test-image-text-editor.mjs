@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
-import { textEditPrompt, validateTextEditAnswer, validateTextEditAnswers, validateTextLines } from '../shared/utils/imageTextEditor.ts';
+import { detectedTextLines, textEditPrompt, textEditRequestText, validateTextEditAnswer, validateTextEditAnswers, validateTextLines } from '../shared/utils/imageTextEditor.ts';
 function loadFunction(file, name, context) {
     const path = new URL(file, import.meta.url);
     const source = ts.createSourceFile(path.pathname, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
@@ -93,6 +93,8 @@ test('LLM detection transcribes every line with approximate locations, coordinat
         AbortSignal,
         falReadableUrl: async url => url,
         validateTextLines,
+        detectedTextLines,
+        textEditRequestText,
         resolveSessionUrl: () => ({ url: imageUrl }),
         completeText: async (options) => { request = options; return response; },
     });
@@ -133,7 +135,7 @@ test('multi-image detection covers current attachments once in upload order and 
     const requests = [];
     const context = vm.createContext({
         AbortSignal,
-        falReadableUrl: async url => url, validateTextLines,
+        falReadableUrl: async url => url, validateTextLines, detectedTextLines, textEditRequestText,
         resolveSessionUrl: () => ({ url: imageUrl }),
         completeText: async (options) => {
             const url = options.messages[1].content[0].image_url.url;

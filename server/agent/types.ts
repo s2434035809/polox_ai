@@ -235,12 +235,28 @@ export interface ChoiceAnswer {
   skipped?: boolean
 }
 
+export interface VideoRequestFields {
+  requestKind?: 'new' | 'extend' | 'redo' | 'modify' | 'finalize'
+  totalDurationSeconds?: number
+  resolution?: string
+  aspectRatio?: string
+  seamlessLoop?: boolean
+  firstFrame?: boolean
+  referenceMedia?: 'none' | 'image' | 'video' | 'image_and_video' | 'audio' | 'unclear'
+  modelId?: string
+  clipCount?: number
+  sourceImageUrls?: string[]
+  structure?: 'continuous' | 'storyboard' | 'conflict'
+}
+
 export interface AskUserArgs {
   textEdits?: ImageTextEdit[]
   textEdit?: ImageTextEdit
   prompt: string
   recommendation: string
   questions: ChoiceQuestion[]
+  /** LLM-declared video intent. The runtime never infers this from user wording. */
+  videoRequest?: VideoRequestFields
 }
 
 export type AgentEvent
@@ -272,6 +288,8 @@ export interface ChatMessage {
   tool_call_id?: string
   /** LLM-only turn; never surface in the chat UI transcript. */
   internal?: boolean
+  /** User pressed Stop; closes an open video request. */
+  stopped?: boolean
 }
 
 export interface ToolCall {
@@ -296,6 +314,6 @@ export interface ConfirmBody {
 
 export interface ChoiceBody {
   choiceId: string
-  action: 'submit' | 'skip'
+  action: 'submit' | 'skip' | 'cancel'
   answers?: ChoiceAnswer[]
 }

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import process from 'node:process'
-import { isBuiltinSkillId, parseSkillMarkdown, userSkillsDir, type SkillDocument } from '../agent/skills'
+import { isBuiltinSkillId, parseSkillMarkdown, skillPlaceholder, userSkillsDir, type SkillDocument } from '../agent/skills'
 import { normalizeSkillCategory, type SkillCategory } from '../../shared/utils/skillCategory'
 import { UserSkill, type IUserSkill, type UserSkillCategory, type UserSkillSource } from '../models/userSkill'
 import { connectDatabase } from './sqlite'
@@ -122,6 +122,7 @@ export async function persistUserSkill(input: PersistUserSkillInput) {
     requires: document.frontmatter.requires,
     maxGenerationsPerRun: document.frontmatter.safety.maxGenerationsPerRun,
     allowSpend: document.frontmatter.safety.allowSpend,
+    placeholder: skillPlaceholder(document.frontmatter.placeholder),
     updatedAt: new Date(),
   }
 
@@ -190,6 +191,7 @@ export function toPublicUserSkill(row: IUserSkill & { _id?: string }, includeBod
     requires: row.requires,
     maxGenerationsPerRun: row.maxGenerationsPerRun,
     allowSpend: row.allowSpend,
+    placeholder: skillPlaceholder(row.placeholder) || undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     markdown,

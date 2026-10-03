@@ -21,7 +21,7 @@ safety:
 
 # Skill Creator (L1)
 
-Use when the user invokes `/skill-creator`, chooses **Create Skill** on the homepage, or asks to create a custom skill. This meta-skill helps them design an L1 skill that **only orchestrates already-registered tools** — no custom code and no custom UI cards.
+Use when the user invokes `/skill-creator`, chooses **Create Skill**, or opens an existing skill's **Edit** workspace. First determine whether the current skill project is bound to an existing skill that is no longer a draft. Without that (including a draft you already saved and renamed with a WIP save, or a draft reopened with **Continue**), you are still creating: continue the **New Skill Flow** from the first unfinished step through category and the step 11 Enable exit. A rename is not the end of the flow. This meta-skill only orchestrates already-registered tools — no custom code and no custom UI cards. Do not ask for an SEO title, public listing, or author badge.
 
 ## Hard limits (say these early)
 
@@ -71,6 +71,8 @@ Call `ask_user` once with question id `skill_cover`:
 - Cover generation is optional; skipping is fine.
 
 ### 9. Save progress (may stay draft until the final exit)
+
+A WIP save does **not** finish the flow. In the same turn, right after a successful draft save — including a rename of a draft — continue with step 10 (`skill_category`, then `exit_skill_creator`, combined in one `ask_user` if you like). Never end the turn with only a plain-text "saved" message while the skill is still a draft. Do not ask for an SEO title.
 
 1. Produce a complete `SKILL.md` with the confirmed id, name, and description from steps 6–7. Prefer keeping the draft brief in chat; do not dump the full markdown unless they ask.
 2. Call `save_user_skill` with `overwrite: true` when updating the bound draft / existing id. WIP may use draft; finishing uses `enabled: true`.
@@ -129,6 +131,7 @@ After the skill content is ready and the category is chosen, call `ask_user` onc
 id: my-skill
 name: My Skill
 description: One-line catalog summary of when to use it.
+placeholder: Short composer hint for this skill…
 version: 1.0.0
 source: user
 visibility: catalog
@@ -157,7 +160,7 @@ When the user opens **Edit** from Skills (`/skills`), the composer is prefilled 
 
 1. Read the provided `Current skill id` and markdown fence — do not invent a new id.
 2. Discuss the requested changes with `ask_user` when intent is unclear.
-3. Produce an updated `SKILL.md` that keeps the same `id` (unless they explicitly ask to rename — then follow step 6 with `except_skill_id`).
+3. Produce an updated `SKILL.md` that keeps the same `id` (unless they explicitly ask to rename — then follow step 6 with `except_skill_id`). A rename save is a WIP save: do not stop after it succeeds; continue to category and exit in the same turn.
 4. Confirm with `ask_user`, then call `save_user_skill` with that same id (`enabled: true` when finishing).
 5. Ask the category with step 10: judge Utility / Fun yourself first, then ask `skill_category` with your judgment first, marked `recommended`, with a one-line reason. Save the user's choice.
 6. Finish with the exit ask_user (`save_and_exit` or `test_now`), saving with the chosen `category`, then call `exit_skill_creator` with that action and `category`.

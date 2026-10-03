@@ -1,4 +1,5 @@
 import type { GenerationProjectList, GenerationProjectPublic } from '~~/shared/types/project'
+import { isSkillWorkspace, studioProjectSelection, studioProjectsOnly } from '~~/shared/utils/projectVisibility'
 
 let inflight: Promise<void> | null = null
 export function useProjects() {
@@ -6,14 +7,34 @@ export function useProjects() {
   const selectedProjectId = useState('generation-project-id', () => '')
   const loaded = useState('generation-projects-loaded', () => false)
   const loading = useState('generation-projects-loading', () => false)
+  const route = useRoute()
+
+  /** Project open on /projects/:id (may be a skill workspace that is not in `projects`). */
+  function openProjectPageId() {
+    const match = /^\/projects\/([^/]+)$/.exec(route?.path || '')
+    return match?.[1] ? decodeURIComponent(match[1]) : ''
+  }
+
   const selectedProject = computed(() => projects.value.find(project => project.id === selectedProjectId.value)
     || projects.value[0]
     || null)
 
   /** Studio/media projects only — skill workspaces live under Skills. */
-  const studioProjects = computed(() =>
-    projects.value.filter(project => project.kind !== 'skill'),
-  )
+  const studioProjects = computed(() => studioProjectsOnly(projects.value))
+
+  /**
+   * Pickers must point at a studio project. A skill workspace can stay selected
+   * while its project page is open; otherwise move back to the default studio project.
+   */
+  function selectStudioProject() {
+    const current = selectedProjectId.value
+    if (current && current === openProjectPageId())
+      return current
+    const next = studioProjectSelection(projects.value, current)
+    if (next && next !== current)
+      selectedProjectId.value = next
+    return next || current
+  }
 
   async function createProject(input: {
     name?: string
@@ -25,7 +46,8 @@ export function useProjects() {
       method: 'POST',
       body: input,
     })
-    projects.value = [project, ...projects.value.filter(item => item.id !== project.id)]
+    if (!isSkillWorkspace(project))
+      projects.value = [project, ...projects.value.filter(item => item.id !== project.id)]
     selectedProjectId.value = project.id
     return project
   }
@@ -41,7 +63,8 @@ export function useProjects() {
       method: 'POST',
       body: input,
     })
-    projects.value = [project, ...projects.value.filter(item => item.id !== project.id)]
+    // Skill workspaces stay out of the studio list; they are opened from My Skills by id.
+    projects.value = projects.value.filter(item => item.id !== project.id)
     selectedProjectId.value = project.id
     return project
   }
@@ -56,14 +79,11 @@ export function useProjects() {
     inflight = (async () => {
       try {
         const data = await $fetch<GenerationProjectList>('/api/projects')
-        projects.value = data.items
-        if (!projects.value.some(project => project.id === selectedProjectId.value)) {
-          const studio = projects.value.filter(project => project.kind !== 'skill')
-          selectedProjectId.value = studio.find(project => project.isDefault)?.id
-            || studio[0]?.id
-            || projects.value[0]?.id
-            || ''
-        }
+        projects.value = studioProjectsOnly(data.items)
+        const selected = projects.value.some(project => project.id === selectedProjectId.value)
+        // Keep selection when the open page is a skill workspace (My Skills Edit/Test).
+        if (!selected && !(selectedProjectId.value && selectedProjectId.value === openProjectPageId()))
+          selectedProjectId.value = studioProjectSelection(projects.value, '')
       }
       catch (error) {
         console.error('[projects]', error)
@@ -89,5 +109,6 @@ export function useProjects() {
     loadProjects,
     createProject,
     ensureSkillProject,
+    selectStudioProject,
   }
 }

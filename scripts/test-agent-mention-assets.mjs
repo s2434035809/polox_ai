@@ -8,7 +8,7 @@ import { parse } from 'vue/compiler-sfc'
 const file = readFileSync(new URL('../app/components/agent-lab/AgentLabChat.vue', import.meta.url), 'utf8')
 const source = ts.createSourceFile('chat.ts', parse(file).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
 function assets(props, query = '') {
-  const state = { props, mention: { value: { query } }, computed: fn => ({ get value() { return fn() } }), isMediaVideoUrl: url => url.endsWith('.mp4') }
+  const state = { props, mention: { value: { query } }, computed: fn => ({ get value() { return fn() } }), isMediaVideoUrl: url => url.endsWith('.mp4'), isMediaAudioUrl: () => false, isMediaDocumentUrl: () => false }
   vm.createContext(state)
   for (const name of ['projectAssets', 'assetMatches']) {
     const statement = source.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration => declaration.name.getText(source) === name))

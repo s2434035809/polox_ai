@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import type { AiModelConfig } from '~~/shared/types/aiModel'
+import type { AssetLibraryAssetSearchItem, AssetLibraryAssetSearchList } from '~~/shared/types/assetLibrary'
+import type { CanvasAssetDragState } from '~/utils/canvasAssetDrag'
+import type { MentionColumn } from '~/utils/mentionAssetLibrary'
 import type { GenerationJobPublic } from '~~/shared/types/generation'
 import type { ImageAnnotationReference } from '~~/shared/utils/imageAnnotations'
 import type { SketchElement } from '~~/shared/utils/sketchToImage'
@@ -14,6 +17,8 @@ import { agentComposerPlaceholder } from '~/utils/agentComposerPlaceholder'
 import { confirmationWorking } from '~/utils/agentConfirmationState'
 import { messageMedia } from '~/utils/agentMessageMedia'
 import { presentAgentResults } from '~/utils/agentResultPresentation'
+import { assetDragTargetsChat, CANVAS_ASSET_DRAG_STATE_KEY, dataTransferHasFiles } from '~/utils/canvasAssetDrag'
+import { filterMentionLibraryAssets, libraryServerSearchTerm, MENTION_LIBRARY_LIMIT, mergeLibraryItems, needsLibraryServerSearch, nextMentionColumn, toMentionLibraryAssets } from '~/utils/mentionAssetLibrary'
 
 const props = withDefaults(defineProps<{
   messages: AgentChatMessage[]
@@ -43,7 +48,10 @@ const props = withDefaults(defineProps<{
   hideAgentChrome?: boolean
   /** Skill ids that cannot be removed from the composer (e.g. skill project Edit/Test). */
   lockedSkillIds?: string[]
+  /** Skill page: prefer this skill's placeholder even before the catalog refresh. */
+  lockedSkill?: { id: string, name: string, description?: string, placeholder?: string }
   hideTranscript?: boolean
+  readOnly?: boolean
 }>(), {
   projectJobs: () => [],
   queueNotice: '',
@@ -55,6 +63,7 @@ const props = withDefaults(defineProps<{
   hideAgentChrome: false,
   lockedSkillIds: () => [],
   hideTranscript: false,
+  readOnly: false,
   stopping: false,
   choiceOpen: false,
 })
@@ -89,6 +98,11 @@ const emit = defineEmits<{
   ]
   skipChoice: [
   ]
+  cancelChoice: [
+        choiceId: string,
+  ]
+  retry: [
+  ]
   createAgent: [
   ]
   selectAgent: [
@@ -113,8 +127,21 @@ const skillCatalog = computed(() => {
     return skillsApi.value.catalog
   return mergeAgentSkillCatalog(skillsApi.value?.userSkills || [])
 })
+const effectiveSkills = computed(() => {
+  const locked = props.lockedSkill
+  if (!locked)
+    return skillCatalog.value
+  if (!skillCatalog.value.some(skill => skill.id === locked.id))
+    return [...skillCatalog.value, { ...locked, description: locked.description || '' }]
+  return locked.placeholder
+    ? skillCatalog.value.map(skill => skill.id === locked.id ? { ...skill, placeholder: locked.placeholder } : skill)
+    : skillCatalog.value
+})
 
-const selectedSkills = computed(() => readSkillCommands(draft.value, skillCatalog.value))
+const selectedSkills = computed(() => {
+  const selected = readSkillCommands(draft.value, effectiveSkills.value)
+  return props.lockedSkill ? selected.filter(skill => skill.id === props.lockedSkill?.id) : selected
+})
 const selectedSkillCommands = computed(() => selectedSkills.value.map(skill => `/${skill.id}`))
 const selectedModels = computed(() => readModelMentions(draft.value).map(id => AGENT_MODELS.find(model => model.id === id)!))
 const sketchSelected = computed(() => selectedModels.value.some(model => model.id === SKETCH_TO_IMAGE_TOOL) || selectedSkills.value.some(skill => skill.id === SKETCH_TO_IMAGE_TOOL))
@@ -135,17 +162,19 @@ watch(sketchKey, () => {
   sketchError.value = ''
 })
 const composerText = computed({
-  get: () => stripSkillCommands(stripModelMentions(draft.value), skillCatalog.value),
+  get: () => stripSkillCommands(stripModelMentions(draft.value), effectiveSkills.value),
   set: (text: string) => { draft.value = [...selectedModels.value.map(modelMention), ...selectedSkillCommands.value, text].join(' ') },
 })
 const mention = ref<ReturnType<typeof findComposerCommand>>(null)
 const skillMatches = computed(() => (props.lockedSkillIds || []).length ? [] as CatalogAgentSkill[] : searchAgentSkills(mention.value?.query || '', skillCatalog.value).filter(skill => !selectedSkills.value.some(selected => selected.id === skill.id)))
 watch(() => mention.value?.trigger, (trigger) => {
-  if (trigger === '@')
+  if (trigger === '@') {
     emit('browseAssets')
+    void loadLibraryAssets()
+  }
 })
 const mentionIndex = ref(0)
-const mentionColumn = ref<'models' | 'assets' | 'skills'>('models')
+const mentionColumn = ref<MentionColumn | 'skills'>('models')
 const mentionStyle = ref<Record<string, string>>({})
 const modelListId = `model-list-${useId()}`
 let composerElement: HTMLTextAreaElement | null = null
@@ -185,7 +214,75 @@ const assetMatches = computed(() => {
   const terms = (mention.value?.query || '').toLowerCase().trim().split(/\s+/).filter(Boolean)
   return projectAssets.value.filter(asset => terms.every(term => asset.name.toLowerCase().includes(term)))
 })
-const mentionCount = computed(() => mentionColumn.value === 'skills' ? skillMatches.value.length : mentionColumn.value === 'models' ? modelMatches.value.length : assetMatches.value.length)
+const libraryItems = ref<AssetLibraryAssetSearchItem[]>([])
+const librarySearchItems = ref<AssetLibraryAssetSearchItem[]>([])
+const libraryLoading = ref(false)
+const librarySearching = ref(false)
+const libraryError = ref('')
+const libraryLoaded = ref(false)
+let libraryLoadedAt = 0
+let libraryRequest = 0
+let librarySearchRequest = 0
+let librarySearchTimer: ReturnType<typeof setTimeout> | undefined
+async function loadLibraryAssets(force = false) {
+  if (!import.meta.client)
+    return
+  if (!force && (libraryLoading.value || (libraryLoaded.value && Date.now() - libraryLoadedAt < 30_000)))
+    return
+  const request = ++libraryRequest
+  libraryLoading.value = true
+  libraryError.value = ''
+  try {
+    const data = await $fetch<AssetLibraryAssetSearchList>('/api/asset-libraries/assets', { query: { limit: MENTION_LIBRARY_LIMIT } })
+    if (request !== libraryRequest)
+      return
+    libraryItems.value = Array.isArray(data?.items) ? data.items : []
+    libraryLoaded.value = true
+    libraryLoadedAt = Date.now()
+  }
+  catch {
+    if (request !== libraryRequest)
+      return
+    libraryError.value = 'Couldn\'t load your Asset Library'
+  }
+  finally {
+    if (request === libraryRequest)
+      libraryLoading.value = false
+  }
+}
+watch([() => mention.value?.trigger === '@' ? mention.value.query : null, () => libraryItems.value.length], ([query]) => {
+  clearTimeout(librarySearchTimer)
+  const term = query == null ? '' : libraryServerSearchTerm(query)
+  if (!term || !needsLibraryServerSearch(libraryItems.value.length, query ?? '')) {
+    librarySearchRequest++
+    librarySearching.value = false
+    librarySearchItems.value = []
+    return
+  }
+  librarySearchTimer = setTimeout(async () => {
+    const request = ++librarySearchRequest
+    librarySearching.value = true
+    try {
+      const data = await $fetch<AssetLibraryAssetSearchList>('/api/asset-libraries/assets', { query: { q: term, limit: MENTION_LIBRARY_LIMIT } })
+      if (request === librarySearchRequest)
+        librarySearchItems.value = Array.isArray(data?.items) ? data.items : []
+    }
+    catch {
+      // Keep the locally filtered first page.
+    }
+    finally {
+      if (request === librarySearchRequest)
+        librarySearching.value = false
+    }
+  }, 250)
+})
+const libraryAssets = computed(() => toMentionLibraryAssets(mergeLibraryItems(libraryItems.value, librarySearchItems.value)))
+const libraryMatches = computed(() => filterMentionLibraryAssets(libraryAssets.value, mention.value?.query))
+const mentionCount = computed(() => mentionColumn.value === 'skills'
+  ? skillMatches.value.length
+  : mentionColumn.value === 'models'
+    ? modelMatches.value.length
+    : mentionColumn.value === 'library' ? libraryMatches.value.length : assetMatches.value.length)
 const activeMentionId = computed(() => mention.value && mentionCount.value ? `${modelListId}-${mentionColumn.value}-${mentionIndex.value}` : undefined)
 watch(mentionCount, (count) => { mentionIndex.value = Math.max(0, Math.min(mentionIndex.value, count - 1)) })
 function updateMention(event: Event) {
@@ -285,6 +382,9 @@ const scroller = ref<HTMLElement | null>(null)
 const transcript = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const fileDropActive = ref(false)
+const canvasAssetDrag = useState<CanvasAssetDragState | null>(CANVAS_ASSET_DRAG_STATE_KEY, () => null)
+const acceptsAttachmentDrop = computed(() => !props.readOnly && !composerLocked.value)
+const dropZoneOver = computed(() => acceptsAttachmentDrop.value && (assetDragTargetsChat(canvasAssetDrag.value) || fileDropActive.value))
 let fileDragDepth = 0
 
 const ATTACH_ACCEPT = new Set([
@@ -302,10 +402,7 @@ const ATTACH_ACCEPT = new Set([
 ])
 
 function isFileDrag(event: DragEvent) {
-  const types = event.dataTransfer?.types
-  if (!types)
-    return false
-  return [...types].includes('Files')
+  return dataTransferHasFiles(event.dataTransfer?.types)
 }
 
 function filesFromDrop(event: DragEvent) {
@@ -610,7 +707,10 @@ async function selectSkill(skill: ReturnType<typeof searchAgentSkills>[number]) 
   composerElement?.setSelectionRange(start, start)
 }
 
-async function selectAsset(asset: typeof projectAssets.value[number]) {
+function thumbnailSrc(url: string) {
+  return url
+}
+async function selectAsset(asset: { url: string, name: string, video: boolean, audio: boolean, document: boolean }) {
   if (!mention.value || composerLocked.value)
     return
   const { start, end } = mention.value
@@ -813,7 +913,7 @@ function onDraftKeydown(event: KeyboardEvent) {
     }
     if (mentionColumn.value !== 'skills' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
       event.preventDefault()
-      mentionColumn.value = event.key === 'ArrowLeft' ? 'models' : 'assets'
+      mentionColumn.value = nextMentionColumn(mentionColumn.value, event.key)
       mentionIndex.value = 0
       return
     }
@@ -836,6 +936,12 @@ function onDraftKeydown(event: KeyboardEvent) {
       if (asset) {
         event.preventDefault()
         void selectAsset(asset)
+        return
+      }
+      const libraryAsset = mentionColumn.value === 'library' ? libraryMatches.value[mentionIndex.value] : undefined
+      if (libraryAsset) {
+        event.preventDefault()
+        void selectAsset(libraryAsset)
         return
       }
       const model = mentionColumn.value === 'models' ? modelMatches.value[mentionIndex.value] : undefined
@@ -920,8 +1026,9 @@ function setActiveAgent(value: unknown) {
     class="relative flex min-h-0 flex-col bg-sidebar"
     :class="[
       composerOnly ? undefined : 'h-full',
-      fileDropActive ? 'ring-2 ring-inset ring-primary' : undefined,
+      dropZoneOver ? 'ring-2 ring-inset ring-primary' : undefined,
     ]"
+    :data-agent-asset-drop="acceptsAttachmentDrop ? '' : undefined"
     @dragenter="onComposerDragEnter"
     @dragover="onComposerDragOver"
     @dragleave="onComposerDragLeave"
@@ -1051,6 +1158,7 @@ function setActiveAgent(value: unknown) {
               @browse-assets="emit('browseAssets')"
               @submit="emit('submitChoice', $event)"
               @skip="emit('skipChoice')"
+              @cancel="emit('cancelChoice', message.choice.id)"
             />
 
           </template>
@@ -1108,6 +1216,7 @@ function setActiveAgent(value: unknown) {
         </div>
         <p v-if="error" class="text-xs text-destructive">
           {{ error }}
+          <button v-if="error.startsWith('The response was interrupted')" type="button" class="ml-1 underline" @click="emit('retry')">Retry</button>
         </p>
       </div>
     </div>
@@ -1206,7 +1315,7 @@ function setActiveAgent(value: unknown) {
             v-if="mention && !composerLocked"
             :id="modelListId"
             role="listbox"
-            :aria-label="mention.trigger === '/' ? 'Choose a skill' : 'Choose a model or project asset'"
+            :aria-label="mention.trigger === '/' ? 'Choose a skill' : 'Choose a model, project asset, or library item'"
             class="fixed z-[100] flex flex-col overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg"
             :style="mentionStyle"
             @mousedown.prevent
@@ -1234,7 +1343,7 @@ function setActiveAgent(value: unknown) {
                 No matching skills
               </p>
             </div>
-            <div v-else class="grid min-h-0 flex-1 grid-cols-2 divide-x divide-border">
+            <div v-else data-testid="mention-columns" class="grid min-h-0 flex-1 snap-x grid-cols-[repeat(3,minmax(10rem,1fr))] divide-x divide-border overflow-x-auto overscroll-x-contain">
               <div role="group" aria-label="Models" class="min-w-0 overflow-y-auto overscroll-contain">
                 <p class="sticky top-0 z-10 bg-popover px-3 py-2 text-xs font-semibold">
                   Models
@@ -1290,6 +1399,48 @@ function setActiveAgent(value: unknown) {
                 </p>
                 <p v-else-if="!assetMatches.length" class="px-3 py-4 text-sm text-muted-foreground" role="status">
                   {{ projectAssets.length ? 'No matching assets' : 'No assets in this project yet' }}
+                </p>
+              </div>
+
+              <div role="group" aria-label="Asset library" data-testid="mention-asset-library" class="min-w-0 snap-start overflow-y-auto overscroll-contain">
+                <p class="sticky top-0 z-10 bg-popover px-3 py-2 text-xs font-semibold">
+                  Asset library<template v-if="libraryLoaded">
+                    · {{ libraryAssets.length }}
+                  </template>
+                </p>
+                <button
+                  v-for="(asset, index) in libraryMatches" :id="`${modelListId}-library-${index}`" :key="asset.id"
+                  type="button" role="option" :aria-selected="mentionColumn === 'library' && index === mentionIndex"
+                  class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent"
+                  :class="mentionColumn === 'library' && index === mentionIndex ? 'bg-accent text-accent-foreground' : ''"
+                  @click="selectAsset(asset)"
+                >
+                  <Icon v-if="asset.audio" name="lucide:music" class="size-9 shrink-0 text-muted-foreground" />
+                  <video
+                    v-else-if="asset.video"
+                    :src="asset.url"
+                    muted
+                    playsinline
+                    preload="metadata"
+                    class="size-9 shrink-0 rounded object-cover bg-muted/40"
+                  />
+                  <img v-else :src="asset.thumbnailUrl || thumbnailSrc(asset.url)" alt="" loading="lazy" class="size-9 shrink-0 rounded object-contain">
+                  <span class="min-w-0"><span class="block truncate text-sm font-medium" :title="asset.name">{{ asset.name }}</span><span class="block truncate text-xs text-muted-foreground">{{ asset.audio ? 'Audio' : asset.video ? 'Video' : 'Image' }}<template v-if="asset.libraryName"> · {{ asset.libraryName }}</template></span></span>
+                </button>
+                <p v-if="libraryLoading && !libraryMatches.length" class="px-3 py-2 text-xs text-muted-foreground" role="status">
+                  Loading asset library…
+                </p>
+                <p v-else-if="libraryError && !libraryMatches.length" class="px-3 py-2 text-xs text-destructive" role="status">
+                  {{ libraryError }}
+                </p>
+                <p v-else-if="librarySearching && !libraryMatches.length" class="px-3 py-2 text-xs text-muted-foreground" role="status">
+                  Searching asset library…
+                </p>
+                <p v-else-if="libraryLoaded && !libraryMatches.length" class="px-3 py-4 text-sm text-muted-foreground" role="status">
+                  {{ libraryAssets.length ? 'No matching library items' : 'No items in your Asset Library yet' }}
+                </p>
+                <p v-else-if="libraryItems.length >= MENTION_LIBRARY_LIMIT && !(mention.query || '').trim()" class="px-3 py-2 text-xs text-muted-foreground">
+                  Showing the {{ MENTION_LIBRARY_LIMIT }} newest · type to search older items
                 </p>
               </div>
             </div>

@@ -14,6 +14,8 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   embedded?: boolean
   newAgentOnSend?: boolean
+  /** Skill page: composer stays on this skill and shows its placeholder. */
+  lockedSkill?: { id: string, name: string, description: string, source?: 'builtin' | 'user', placeholder?: string }
 }>(), {
   compact: false,
   embedded: false,
@@ -26,10 +28,10 @@ const emit = defineEmits<{
   /** User is sending from the homepage composer — pending deep-link handoffs must stop re-inserting. */
   sendStart: []
 }>()
-const { projects, selectedProjectId, createProject } = useProjects()
+const { studioProjects, selectedProjectId, createProject, selectStudioProject } = useProjects()
 const { enterSelectedProject, resolveTargetProjectId } = useAgentWorkspaceNav()
 const { createDraftAndOpenEditor, priming: primingSkillCreator } = useSkillCreatorLaunch()
-const { sessionId: agentSessionId, messages, images, allImages, status, waitingForUserConfirm, waitingForUserChoice, pending, draft, attachments, attaching, error, sendMessage, stopAgent, stopping, attachFiles, attachUrls, removeAttachment, resolveConfirmation, resolveChoice, qualityPreference, confirmPolicy, agents, activeAgentId, canCreateAgent, canSwitchAgent, createAgent, selectAgent, queueNotice, ensureHydrated, flush } = useAgentLab({ projectId: selectedProjectId })
+const { sessionId: agentSessionId, messages, images, allImages, status, waitingForUserConfirm, waitingForUserChoice, pending, draft, attachments, attaching, error, sendMessage, stopAgent, cancelChoice, stopping, attachFiles, attachUrls, removeAttachment, resolveConfirmation, resolveChoice, retryInterruptedTurn, qualityPreference, confirmPolicy, agents, activeAgentId, canCreateAgent, canSwitchAgent, createAgent, selectAgent, queueNotice, ensureHydrated, flush } = useAgentLab({ projectId: selectedProjectId })
 const hasSketch = computed(() =>
   readModelMentions(draft.value, true).includes(SKETCH_TO_IMAGE_TOOL)
   || readSkillCommands(draft.value).some(skill => skill.id === SKETCH_TO_IMAGE_TOOL),
@@ -189,8 +191,17 @@ async function submitCreateProject() {
     creatingProject.value = false
   }
 }
+function seedLockedDraft() {
+  const skill = props.lockedSkill
+  if (!skill)
+    return
+  const rest = draft.value.replace(/(?:^|\s)\/[a-z][a-z0-9-]{0,63}(?=\s|$)/g, ' ').trim()
+  draft.value = `/${skill.id}${rest ? ` ${rest}` : ''}`
+}
+const freshComposer = computed(() => props.newAgentOnSend || Boolean(props.lockedSkill))
 onMounted(async () => {
   try {
+    selectStudioProject()
     await resolveTargetProjectId()
   }
   catch (error) {
@@ -198,8 +209,12 @@ onMounted(async () => {
     console.error('[home-composer] resolve project', error)
   }
   finally {
+    seedLockedDraft()
     emit('ready')
   }
+})
+watch(() => props.lockedSkill?.id, () => {
+  seedLockedDraft()
 })
 async function onSend() {
   if (hasSketch.value) {
@@ -224,7 +239,7 @@ async function onSend() {
   emit('sendStart')
   await resolveTargetProjectId()
   await nextTick()
-  const sent = await sendMessage({ newAgent: props.newAgentOnSend })
+  const sent = await sendMessage({ newAgent: freshComposer.value, lockedSkillIds: props.lockedSkill ? [props.lockedSkill.id] : [], enforceLockedSkill: Boolean(props.lockedSkill) })
   if (sent) {
     // Persist the new agent before route change so the project page hydrates it.
     flush()
@@ -251,7 +266,7 @@ function onProjectChange(value: string | number) {
     >
       <div class="flex flex-col gap-3" :class="embedded ? '' : 'p-4 md:p-5'">
         <div
-          v-if="projects.length"
+          v-if="studioProjects.length"
           class="flex flex-wrap items-center gap-2"
         >
           <DropdownMenu :modal="false">
@@ -262,7 +277,7 @@ function onProjectChange(value: string | number) {
                 class="h-8 gap-1.5 border-border bg-muted/45 px-2.5 text-xs shadow-none hover:bg-accent"
               >
                 <Folder class="size-3.5" />
-                {{ projects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
+                {{ studioProjects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
                 <ChevronDown class="size-3.5 opacity-50" />
               </Button>
             </DropdownMenuTrigger>
@@ -277,7 +292,7 @@ function onProjectChange(value: string | number) {
                   @update:model-value="onProjectChange"
                 >
                   <DropdownMenuRadioItem
-                    v-for="project in projects"
+                    v-for="project in studioProjects"
                     :key="project.id"
                     :value="project.id"
                   >
@@ -323,30 +338,32 @@ function onProjectChange(value: string | number) {
             v-model:quality-preference="qualityPreference"
             v-model:confirm-policy="confirmPolicy"
             class="h-full"
-            :messages="newAgentOnSend ? [] : messages"
-            :session-id="newAgentOnSend ? '' : agentSessionId"
-            :images="newAgentOnSend ? [] : images"
+            :messages="freshComposer ? [] : messages"
+            :session-id="freshComposer ? '' : agentSessionId"
+            :images="freshComposer ? [] : images"
             :project-images="allImages"
             :project-jobs="projectJobs"
             :project-assets-loading="projectAssetsLoading"
             :project-assets-error="projectAssetsError"
             :attachments="attachments"
             sketch-in-project-only
-            :status="newAgentOnSend ? 'idle' : status"
-            :pending="newAgentOnSend ? false : pending"
+            :status="freshComposer ? 'idle' : status"
+            :pending="freshComposer ? false : pending"
             :attaching="attaching"
             :stopping="stopping"
             :error="error"
 
-            :confirmation-open="!newAgentOnSend && waitingForUserConfirm"
-            :choice-open="!newAgentOnSend && waitingForUserChoice"
-            :queue-notice="newAgentOnSend ? '' : queueNotice"
+            :confirmation-open="!freshComposer && waitingForUserConfirm"
+            :choice-open="!freshComposer && waitingForUserChoice"
+            :queue-notice="freshComposer ? '' : queueNotice"
             :agents="agents"
             :active-agent-id="activeAgentId"
             :can-create-agent="canCreateAgent"
             :can-switch-agent="canSwitchAgent"
             :composer-only="compact"
-            :hide-transcript="!messages.length"
+            :hide-transcript="freshComposer || !messages.length"
+            :locked-skill-ids="lockedSkill ? [lockedSkill.id] : []"
+            :locked-skill="lockedSkill"
             @browse-assets="loadProjectAssets"
 
             @send="onSend"
@@ -359,6 +376,8 @@ function onProjectChange(value: string | number) {
             @cancel="resolveConfirmation('cancel')"
             @submit-choice="resolveChoice('submit', $event)"
             @skip-choice="resolveChoice('skip')"
+              @cancel-choice="cancelChoice"
+              @retry="retryInterruptedTurn"
             @create-agent="createAgent"
             @select-agent="selectAgent"
           />

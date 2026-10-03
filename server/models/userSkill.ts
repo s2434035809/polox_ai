@@ -28,6 +28,8 @@ export interface IUserSkill {
   allowSpend: boolean
   /** Bound skill workspace project id (1:1). */
   projectId?: string
+  /** Composer hint copied from SKILL.md frontmatter. */
+  placeholder?: string
   createdAt: Date
   updatedAt: Date
 }

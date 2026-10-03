@@ -36,6 +36,26 @@ PoloX runs locally with Nuxt, Vue, and SQLite. Bring your own [WaveSpeed](https:
 
 ## Updates
 
+### October 3, 2026 — v2.2.0
+
+1. **Agent video choices** — before the first video in a request, the agent shows a live card of the models registered on your machine (the cheapest suitable one is marked Recommended), then a duration and resolution card that starts at the cheapest tier. The rank is a local relative cost index, not a quote and not a hosted credit balance.
+
+2. **Web search** — the agent can look up public facts, especially official image and video sizes, using a built-in spec index plus DuckDuckGo and Bing. No extra API key.
+
+3. **Asset library sheet** — a resizable sheet on the canvas (at most half the viewport) for browsing the library and adding assets to the project.
+
+4. **Canvas drag and drop** — drag a finished canvas asset into chat, or drop files onto the canvas to upload them as assets. Types and size limits match chat attachments.
+
+5. **Library @ mentions** — search the asset library from the composer and attach those files to the turn.
+
+6. **Skills** — a skill page locks the composer to that skill on the first message, My Skills is paginated and searchable, and skill-editing workspaces stay out of studio project lists.
+
+7. **Image text edits** — detected lines can be prefilled into the editor, and model coordinates are normalized before the edit runs.
+
+8. **Hidden tabs** — in-flight agent requests stop when the page is hidden and can resume when you return.
+
+9. **Left out on purpose** — this open-source release does not include hosted billing, subscriptions, or marketing/SEO pages. Generation still uses your own WaveSpeed key.
+
 ### September 26, 2026 — v2.1.0
 
 1. **LLM image budget** — each request accepts up to 8 images and 18 MB; older images are sent as links, local images are shrunk to 1536px WebP before upload, and a 413 response gets one retry.

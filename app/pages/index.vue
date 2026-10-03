@@ -369,7 +369,7 @@ useSeoMeta({
     <HomeRecentProjects />
 
     <div class="flex flex-col gap-5 md:gap-6">
-      <HomeSkills @select="startSkillHandoff" />
+      <HomeSkills />
       <HomeFrontierModels @select="selectFrontierModel" />
       <HomeUsefulTools />
     </div>

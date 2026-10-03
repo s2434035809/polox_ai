@@ -5,8 +5,6 @@ import { mergeAgentSkillCatalog, PUBLIC_AGENT_SKILLS, type CatalogAgentSkill } f
 import { countSkillsByCategory, filterSkillsByCategory, normalizeSkillCategory } from '~~/shared/utils/skillCategory'
 import SkillCategoryTabs from '~/components/skills/SkillCategoryTabs.vue'
 
-const emit = defineEmits<{ select: [skillId: string] }>()
-
 const { data } = await useFetch<{
   catalog?: CatalogAgentSkill[]
   userSkills?: Array<{ id: string, name: string, description: string, keywords?: string, cover?: string, category?: string, enabled: boolean }>
@@ -133,10 +131,9 @@ async function goCreateSkill() {
       <NuxtLink
         v-for="skill in skills"
         :key="skill.id"
-        :to="{ path: '/', query: { agentSkill: skill.id }, hash: '#generator' }"
+        :to="`/skills/${skill.id}`"
         :aria-label="`Use ${skill.name} skill`"
         class="group flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-none transition-colors duration-150 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        @click.prevent="emit('select', skill.id)"
       >
         <div class="relative aspect-[4/3] overflow-hidden bg-muted">
           <img

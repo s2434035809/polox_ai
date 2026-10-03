@@ -23,6 +23,8 @@ export interface SkillFrontmatter {
    * or for builtins (from BUILTIN_SKILL_CATEGORIES). Readers default missing to utility.
    */
   category?: SkillCategory
+  /** Composer hint. Optional frontmatter `placeholder:`. */
+  placeholder?: string
   safety: {
     maxGenerationsPerRun: number
     allowSpend: boolean
@@ -125,6 +127,13 @@ function parseScalar(value: string): string | number | boolean {
   return trimmed
 }
 
+/** Composer placeholder from frontmatter. Empty and non-strings are omitted. */
+export function skillPlaceholder(value: unknown) {
+  if (typeof value !== 'string')
+    return ''
+  return value.replace(/\s+/g, ' ').trim().slice(0, 200)
+}
+
 /** Minimal YAML-ish frontmatter parser for skill documents (no external deps). */
 export function parseSkillMarkdown(raw: string, fallbackId: string, source: SkillSource = 'builtin'): SkillDocument {
   const trimmed = raw.replace(/^\uFEFF/, '')
@@ -202,6 +211,7 @@ export function parseSkillMarkdown(raw: string, fallbackId: string, source: Skil
       : source === 'builtin'
         ? { category: builtinSkillCategory(String(data.id || fallbackId)) }
         : {}),
+    ...(skillPlaceholder(data.placeholder) ? { placeholder: skillPlaceholder(data.placeholder) } : {}),
     safety: {
       maxGenerationsPerRun: Number(safetyRaw.maxGenerationsPerRun ?? data.maxGenerationsPerRun ?? 3) || 3,
       allowSpend: safetyRaw.allowSpend === undefined && data.allowSpend === undefined
@@ -371,7 +381,7 @@ export function skillsPromptBlock(options: SkillsPromptOptions = {}) {
     '- Prefer explicit `/user-skill-id` when a user skill and a builtin specialty share intent; otherwise builtin specialty workflows win.',
     '- L1 user skills may only orchestrate registered tools (ask_user, request_voice_recording, generate_*, model_*, concat_videos, measure_video_duration, extract_video_frame, inspect_website, export_zip, load_skill, save_user_skill). They cannot invent custom UI cards (box/mask/coord editors). Compose existing specialty skills or ask the user to open an Issue for new UI.',
     '- load_skill is free and read-only. save_user_skill validates and persists user skills; never overwrite builtin ids.',
-    '- Skill Creator: right before the final exit, first judge the category yourself from the skill purpose (utility = functional/productivity, fun = entertainment/playful/novelty; unclear = utility), then ask_user skill_category with your judged option first, set as recommended, labeled (Recommended), with a one-line reason; save the option the user picked as category on the final save_user_skill and exit_skill_creator.',
+    '- Skill Creator: a WIP or rename save does not finish the flow. In the same turn continue to skill_category, then the Enable exit. Right before the final exit, first judge the category yourself from the skill purpose (utility = functional/productivity, fun = entertainment/playful/novelty; unclear = utility), then ask_user skill_category with your judged option first, set as recommended, labeled (Recommended), with a one-line reason; save the option the user picked as category on the final save_user_skill and exit_skill_creator. Do not ask for an SEO title.',
     '- In a skill project Test mode, when the user asks to use a generated or uploaded image as the skill cover, call set_skill_cover({ url }) with that image URL (free, no /skill-creator needed).',
     '- Skill id and /triggers must be English kebab-case (a-z, 0-9, hyphens). Display name and catalog description must be English (agent recommendations and saved copy).',
   )

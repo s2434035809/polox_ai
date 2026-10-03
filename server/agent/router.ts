@@ -170,7 +170,9 @@ export async function dispatchAgentRequest(input: {
   }
   const stopMatch = path.match(/^\/v1\/sessions\/([^/]+)\/stop$/)
   if (method === 'POST' && stopMatch) {
-    const body = await handleStop(decodeURIComponent(stopMatch[1] || ''))
+    const stopBody = (input.body || {}) as { cancelledChoiceId?: unknown }
+    const cancelledChoiceId = typeof stopBody.cancelledChoiceId === 'string' ? stopBody.cancelledChoiceId.slice(0, 200) : undefined
+    const body = await handleStop(decodeURIComponent(stopMatch[1] || ''), cancelledChoiceId ? { cancelledChoiceId } : undefined)
     return { kind: 'json', status: 200, body }
   }
   if (method === 'POST' && path === '/v1/chat') {
@@ -180,6 +182,7 @@ export async function dispatchAgentRequest(input: {
         projectId,
         history: body.history,
         images: body.images,
+        lockedSkill: typeof body.lockedSkill === 'string' ? body.lockedSkill : undefined,
       })
     })
     return { kind: 'sse', stream }

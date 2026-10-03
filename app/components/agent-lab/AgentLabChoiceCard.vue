@@ -8,7 +8,7 @@ import { standaloneImageEditQuestions, withCustomChoiceOption } from '~~/shared/
 
 const props = withDefaults(defineProps<{
   choice: ChoicePayload
-  state?: 'pending' | 'answered' | 'skipped'
+  state?: 'pending' | 'answered' | 'skipped' | 'cancelled'
   answers?: ChoiceAnswer[]
   readOnly?: boolean
   pending?: boolean
@@ -24,6 +24,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   submit: [answers: ChoiceAnswer[]]
   skip: []
+  cancel: []
   browseAssets: []
 }>()
 
@@ -45,6 +46,32 @@ const recommendation = computed(() => {
   return method ? method.options.find(option => option.id === 'annotate')?.label || '' : props.choice.recommendation
 })
 const isPending = computed(() => (props.state || 'pending') === 'pending')
+const step = ref(0)
+const wizard = computed(() => isPending.value && !props.readOnly && questions.value.length > 1 && !recordingVoice.value && !annotating.value && !removing.value && !drawing.value)
+const stepIndex = computed(() => Math.min(Math.max(0, step.value), Math.max(0, questions.value.length - 1)))
+const onLastStep = computed(() => stepIndex.value >= questions.value.length - 1)
+const shownQuestions = computed(() => wizard.value ? questions.value.slice(stepIndex.value, stepIndex.value + 1) : questions.value)
+function currentStepReady() {
+  const question = questions.value[stepIndex.value]
+  if (!question)
+    return false
+  const option = selectedOption(question)
+  if (!option)
+    return false
+  if (option.custom)
+    return Boolean(selections.value[question.id]?.text.trim())
+  return true
+}
+function goNext() {
+  if (!wizard.value || onLastStep.value || !currentStepReady())
+    return
+  step.value = stepIndex.value + 1
+}
+function goBack() {
+  if (stepIndex.value <= 0)
+    return
+  step.value = stepIndex.value - 1
+}
 const promptExpanded = ref(false)
 const questionPromptExpanded = ref<Record<string, boolean>>({})
 const choicePrompt = computed(() => (props.choice.prompt || '').trim())
@@ -109,6 +136,7 @@ watch(
   () => props.choice.id,
   () => {
     promptExpanded.value = false
+    step.value = 0
     questionPromptExpanded.value = {}
     selections.value = {}
     regionsByImage.value = {}
@@ -400,7 +428,15 @@ const resolvedAnswers = computed(() => {
           </div>
         </div>
         <Badge
-          v-if="state === 'skipped'"
+          v-if="state === 'cancelled'"
+          variant="outline"
+          class="shrink-0"
+          data-testid="agent-choice-cancelled"
+        >
+          Cancelled
+        </Badge>
+        <Badge
+          v-else-if="state === 'skipped'"
           variant="outline"
           class="shrink-0"
         >
@@ -427,6 +463,13 @@ const resolvedAnswers = computed(() => {
         Record with the mic, then tap Finish. Skip lets the agent decide.
       </p>
       <p
+        v-else-if="isPending && !readOnly && wizard"
+        class="text-xs text-muted-foreground"
+        data-testid="agent-choice-steps"
+      >
+        Question {{ stepIndex + 1 }} of {{ questions.length }}. Skip uses the recommendation. Cancel stops this run.
+      </p>
+      <p
         v-else-if="isPending && !readOnly"
         class="text-xs text-muted-foreground"
       >
@@ -437,7 +480,7 @@ const resolvedAnswers = computed(() => {
     <CardContent v-if="isPending" class="px-4">
       <div class="flex flex-col gap-5">
         <fieldset
-          v-for="question in questions"
+          v-for="question in shownQuestions"
           :key="question.id"
           class="min-w-0"
         >
@@ -592,7 +635,7 @@ const resolvedAnswers = computed(() => {
             {{ item.question.title || item.question.prompt }}
           </p>
           <p class="mt-0.5 text-sm text-foreground">
-            {{ item.skipped ? 'Agent will decide' : (item.summary || 'Saved') }}
+            {{ state === 'cancelled' ? 'Cancelled' : item.skipped ? 'Agent will decide' : (item.summary || 'Saved') }}
           </p>
           <div v-if="item.answer?.annotationEdit" class="mt-2 flex flex-col gap-1 text-sm">
             <p v-for="(point, index) in item.answer.annotationEdit.points" :key="index">
@@ -614,6 +657,27 @@ const resolvedAnswers = computed(() => {
 
     <CardFooter v-if="isPending && !readOnly" class="justify-end gap-2 border-t border-border px-4 pt-3">
       <Button
+        variant="ghost"
+        size="sm"
+        class="mr-auto rounded-lg shadow-none"
+        data-testid="agent-choice-cancel"
+        :disabled="pending || readOnly || uploading"
+        title="Stop the agent and cancel this question"
+        @click="emit('cancel')"
+      >
+        Cancel
+      </Button>
+      <Button
+        v-if="wizard && stepIndex > 0"
+        variant="outline"
+        size="sm"
+        class="rounded-lg shadow-none"
+        :disabled="pending || uploading"
+        @click="goBack"
+      >
+        Back
+      </Button>
+      <Button
         variant="outline"
         size="sm"
         class="rounded-lg shadow-none"
@@ -623,7 +687,16 @@ const resolvedAnswers = computed(() => {
         Skip
       </Button>
       <Button
-        v-if="!recordingVoice"
+        v-if="wizard && !onLastStep"
+        size="sm"
+        class="rounded-lg shadow-none"
+        :disabled="!currentStepReady() || pending || uploading"
+        @click="goNext"
+      >
+        Next
+      </Button>
+      <Button
+        v-else-if="!recordingVoice"
         size="sm"
         class="rounded-lg shadow-none"
         :disabled="!canSubmit"

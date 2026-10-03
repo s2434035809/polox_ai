@@ -5,6 +5,7 @@ import { toast } from 'vue-sonner'
 import { readErrorMessage } from '~~/shared/utils/apiError'
 import type { SkillCategory, SkillCategoryTab } from '~~/shared/utils/skillCategory'
 import { countSkillsByCategory, filterSkillsByCategory, normalizeSkillCategory, SKILL_CATEGORIES, SKILL_CATEGORY_LABELS } from '~~/shared/utils/skillCategory'
+import { MY_SKILLS_PAGE_SIZE, mySkillMatchesSearch, mySkillPageAfterRemoval, mySkillPageSlice } from '~~/shared/utils/mySkillPagination'
 import SkillCategoryTabs from '~/components/skills/SkillCategoryTabs.vue'
 
 interface UserSkillRow {
@@ -12,6 +13,7 @@ interface UserSkillRow {
   name: string
   description: string
   keywords?: string
+  triggers?: string[]
   enabled: boolean
   category?: SkillCategory
   version?: string
@@ -41,8 +43,15 @@ const deleteOpen = ref(false)
 const deleting = ref(false)
 const deletingSkill = ref<UserSkillRow | null>(null)
 const activeCategory = ref<SkillCategoryTab>('all')
+const search = ref('')
+const page = ref(1)
 const categoryCounts = computed(() => countSkillsByCategory(skills.value))
-const visibleSkills = computed(() => filterSkillsByCategory(skills.value, activeCategory.value))
+const visibleSkills = computed(() => filterSkillsByCategory(skills.value, activeCategory.value).filter(skill => mySkillMatchesSearch(skill, search.value)))
+const pageInfo = computed(() => mySkillPageSlice(page.value, MY_SKILLS_PAGE_SIZE, visibleSkills.value.length))
+const pagedSkills = computed(() => visibleSkills.value.slice(pageInfo.value.skip, pageInfo.value.skip + pageInfo.value.limit))
+watch([activeCategory, search], () => {
+  page.value = 1
+})
 
 async function loadSkills() {
   if (loading.value)
@@ -103,7 +112,9 @@ async function confirmDelete() {
   const id = deletingSkill.value.id
   try {
     await $fetch(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    const stillOnPage = pagedSkills.value.filter(item => item.id !== id).length
     skills.value = skills.value.filter(item => item.id !== id)
+    page.value = mySkillPageAfterRemoval(page.value, stillOnPage)
     deleteOpen.value = false
     deletingSkill.value = null
     toast.success('Skill deleted')
@@ -301,6 +312,13 @@ function goCreate() {
     </div>
 
     <template v-else>
+    <Input
+      v-model="search"
+      type="search"
+      placeholder="Search skills"
+      aria-label="Search skills"
+      class="mb-3 max-w-sm rounded-xl shadow-none"
+    />
     <SkillCategoryTabs
       v-model="activeCategory"
       id-prefix="my-skills-category-tab"
@@ -315,7 +333,7 @@ function goCreate() {
       class="rounded-2xl border border-dashed border-border bg-card/60 px-4 py-10 text-center text-sm text-muted-foreground"
       role="status"
     >
-      No {{ activeCategory === 'fun' ? 'Fun' : 'Utility' }} skills yet.
+      {{ search.trim() ? 'No skills match that search.' : `No ${activeCategory === 'fun' ? 'Fun' : 'Utility'} skills yet.` }}
     </p>
     <ul
       v-else
@@ -325,14 +343,16 @@ function goCreate() {
       class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
     >
       <li
-        v-for="skill in visibleSkills"
+        v-for="skill in pagedSkills"
         :key="skill.id"
         class="flex flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-none"
       >
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0 flex-1">
             <h2 class="truncate text-base font-medium text-foreground">
-              {{ skill.name }}
+              <NuxtLink :to="`/skills/${skill.id}`" class="hover:underline">
+                {{ skill.name }}
+              </NuxtLink>
             </h2>
             <p class="mt-0.5 truncate font-mono text-xs text-muted-foreground">
               /{{ skill.id }}
@@ -428,6 +448,20 @@ function goCreate() {
         </div>
       </li>
     </ul>
+    <div
+      v-if="pageInfo.total > pageInfo.limit"
+      class="mt-4 flex items-center justify-between gap-3 text-sm text-muted-foreground"
+    >
+      <span>Page {{ pageInfo.page }} of {{ Math.ceil(pageInfo.total / pageInfo.limit) }}</span>
+      <div class="flex gap-2">
+        <Button type="button" variant="outline" size="sm" class="rounded-lg shadow-none" :disabled="pageInfo.page <= 1" @click="page = pageInfo.page - 1">
+          Previous
+        </Button>
+        <Button type="button" variant="outline" size="sm" class="rounded-lg shadow-none" :disabled="pageInfo.skip + pageInfo.limit >= pageInfo.total" @click="page = pageInfo.page + 1">
+          Next
+        </Button>
+      </div>
+    </div>
     </template>
 
     <AlertDialog v-model:open="deleteOpen">

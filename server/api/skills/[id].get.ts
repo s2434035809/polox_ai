@@ -23,6 +23,7 @@ export default defineEventHandler(async (event) => {
       triggers: doc.frontmatter.triggers,
       requires: doc.frontmatter.requires,
       category: doc.frontmatter.category || catalog?.category || 'utility',
+      placeholder: catalog?.placeholder || doc.frontmatter.placeholder || '',
       markdown: doc.raw,
       catalog,
     }

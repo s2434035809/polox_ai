@@ -1,7 +1,7 @@
 {
   "name": "polox_ai",
   "type": "module",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "packageManager": "pnpm@10.10.0",
   "description": "An open-source, agent-native platform for multimodal AI generation, built on DeepSeek Harness. Every interaction lives in agent conversations and an infinite canvas, unifying creation, generation, and editing.",
   "author": "Dian Pratama <dianpratama2@gmail.com>",

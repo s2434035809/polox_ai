@@ -7,10 +7,13 @@ import { readErrorMessage } from '~~/shared/utils/apiError'
 defineProps<{
   disabled?: boolean
 }>()
-const { projects, selectedProjectId, createProject, loading } = useProjects()
+const { studioProjects, selectedProjectId, createProject, loading, selectStudioProject } = useProjects()
 const creating = ref(false)
 const mounted = ref(false)
-onMounted(() => { mounted.value = true })
+onMounted(() => {
+  mounted.value = true
+  selectStudioProject()
+})
 async function onCreate() {
   creating.value = true
   try {
@@ -32,7 +35,7 @@ async function onCreate() {
       <DropdownMenuTrigger as-child>
         <Button type="button" variant="outline" size="sm" class="gap-1.5" :disabled="!mounted || disabled || loading || creating" aria-label="Select project">
           <Folder class="size-3.5" />
-          {{ projects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
+          {{ studioProjects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
           <ChevronDown class="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
@@ -40,7 +43,7 @@ async function onCreate() {
         <DropdownMenuLabel>Project</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuRadioGroup v-model="selectedProjectId">
-          <DropdownMenuRadioItem v-for="project in projects" :key="project.id" :value="project.id">
+          <DropdownMenuRadioItem v-for="project in studioProjects" :key="project.id" :value="project.id">
             {{ project.name }}
           </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>

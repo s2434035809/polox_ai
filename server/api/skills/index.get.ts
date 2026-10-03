@@ -34,6 +34,7 @@ export default defineEventHandler(async (event) => {
         cover: skill.cover,
         source: 'user' as const,
         category: skill.category,
+        placeholder: skill.placeholder || undefined,
         enabled: true,
         createdAt: skill.createdAt,
       })),

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { CanvasRect } from '~~/shared/types/canvas'
 import type { GenerationJobPublic, GenerationJobState } from '~~/shared/types/generation'
-import type { AgentImage } from '~/composables/useAgentLab'
+import type { AssetLibraryAssetPublic } from '~~/shared/types/assetLibrary'
+import type { AgentImage, CanvasUploadHooks } from '~/composables/useAgentLab'
+import type { CanvasAssetDragState } from '~/utils/canvasAssetDrag'
 import type { CanvasCorner, CanvasGuide, CanvasPoint } from '~/utils/infiniteCanvas'
 import { isGenerationActive } from '~~/shared/types/generation'
 import { assetName, matchingAgentAsset } from '~~/shared/utils/assetName'
@@ -9,6 +11,12 @@ import { isImageLayerSplitterModel } from '~~/shared/utils/imageLayerSplitter'
 import { isMediaAudioUrl, isMediaDocumentUrl, isMediaVideoUrl, mediaDocumentLabel } from '~~/shared/utils/seedance25'
 import { canUseAsSkillCover } from '~~/shared/utils/skillCover'
 import { byCanvasOrder, CARD_CHROME_HEIGHT, CARD_HEIGHT, CARD_WIDTH, CELL_X, CELL_Y, clampZoom, findFreeRect, fitMediaRect, intersectsSelection, inViewport, isDefaultCanvasGrid, latestCanvasAsset, MAX_PLAYING_VIDEOS, MAX_VISIBLE, resizeFromCorner, snapCanvasRect, zoomAt } from '~/utils/infiniteCanvas'
+import { toast } from 'vue-sonner'
+import AgentLabAssetDragGhost from '~/components/agent-lab/AgentLabAssetDragGhost.vue'
+import AssetLibrarySheet from '~/components/agent-lab/AssetLibrarySheet.vue'
+import { AGENT_UPLOAD_ACCEPT } from '~/utils/agentUploadRules'
+import { acceptsAssetDrop, canDragAssetToChat, CANVAS_ASSET_DRAG_STATE_KEY, canvasAssetDragPhase, canvasDragAssetKind, canvasHandoffEnabled, dataTransferHasFiles, isOutsideRect, isOverCanvasOverlay, resolveAssetDropTarget, type AssetDropTarget } from '~/utils/canvasAssetDrag'
+import { canvasWorldPoint, layoutCenteredFiles, layoutDroppedFiles } from '~/utils/canvasFileDrop'
 
 const props = defineProps<{
   jobs: GenerationJobPublic[]
@@ -22,6 +30,11 @@ const props = defineProps<{
   deletingTaskId?: string | null
   loading?: boolean
   emptyMessage?: string
+  readOnly?: boolean
+  /** Uploads OS files dropped on the canvas as canvas assets (omit to disable file drops). */
+  uploadFiles?: (files: File[], hooks: CanvasUploadHooks) => Promise<void>
+  /** Places already-hosted library media on the canvas (omit to hide the library sheet). */
+  addUrls?: (items: Array<{ url: string, name?: string, kind?: 'image' | 'video' | 'audio' }>, hooks: { beforeInsert?: (image: AgentImage) => void }) => Promise<string[]>
 }>()
 export type CanvasLibraryAsset = { url: string, name: string, kind: 'image' | 'video' | 'audio' }
 const emit = defineEmits<{
@@ -182,7 +195,182 @@ const { open } = useMediaLightbox()
 const urlPositions = new Map<string, CanvasRect>()
 let frame = 0
 let pendingMove: { x: number, y: number } | undefined
-let drag: { pointer: number, x: number, y: number, origin: CanvasPoint, id?: string } | undefined
+let drag: { pointer: number, x: number, y: number, origin: CanvasPoint, id?: string, handoff?: boolean } | undefined
+const assetDrag = useState<CanvasAssetDragState | null>(CANVAS_ASSET_DRAG_STATE_KEY, () => null)
+const handoffGhost = ref<CanvasAssetDragState | null>(null)
+function setHandoff(next: CanvasAssetDragState | null) {
+  handoffGhost.value = next
+  assetDrag.value = next
+}
+function handoffTargetAt(x: number, y: number, asset: Asset): AssetDropTarget | null {
+  if (typeof document === 'undefined')
+    return null
+  const target = resolveAssetDropTarget(document.elementFromPoint(x, y))
+  return target && target.type !== 'canvas' && acceptsAssetDrop(target, { source: 'canvas', kind: canvasDragAssetKind(asset) }) ? target : null
+}
+function overCanvasOverlay(x: number, y: number) {
+  return typeof document !== 'undefined' && isOverCanvasOverlay(document.elementFromPoint(x, y))
+}
+function updateHandoff(point: { x: number, y: number }) {
+  if (!drag?.handoff || !drag.id || !surface.value)
+    return false
+  const outside = isOutsideRect({ x: point.x, y: point.y }, surface.value.getBoundingClientRect()) || overCanvasOverlay(point.x, point.y)
+  const asset = assets.value.find(item => item.id === drag!.id)
+  if (!outside || !asset) {
+    if (handoffGhost.value)
+      setHandoff(null)
+    return false
+  }
+  const target = handoffTargetAt(point.x, point.y, asset)
+  const phase = canvasAssetDragPhase({ outside, overTarget: Boolean(target) })
+  if (phase === 'canvas')
+    return false
+  const kind = canvasDragAssetKind(asset)
+  setHandoff({
+    phase,
+    x: point.x,
+    y: point.y,
+    name: asset.name || asset.prompt,
+    previewUrl: kind === 'image' ? asset.url : '',
+    kind,
+    source: 'canvas',
+    ...(target ? { target: target.type, ...(target.type === 'library' ? { libraryId: target.libraryId } : {}) } : {}),
+  })
+  return true
+}
+const reservedDropPositions = new Map<string, CanvasRect>()
+const fileDragDepth = ref(0)
+const fileDropEnabled = computed(() => Boolean(props.uploadFiles) && !props.readOnly)
+const acceptsFileDrop = computed(() => fileDropEnabled.value && ready.value && !loadError.value)
+const fileDropActive = computed(() => acceptsFileDrop.value && fileDragDepth.value > 0)
+const uploadPlaceholders = ref<Array<{ id: string, name: string, rect: CanvasRect }>>([])
+function onFileDragEnter(event: DragEvent) {
+  if (!fileDropEnabled.value || !dataTransferHasFiles(event.dataTransfer?.types))
+    return
+  event.preventDefault()
+  fileDragDepth.value++
+}
+function onFileDragOver(event: DragEvent) {
+  if (!fileDropEnabled.value || !dataTransferHasFiles(event.dataTransfer?.types))
+    return
+  event.preventDefault()
+  if (event.dataTransfer)
+    event.dataTransfer.dropEffect = acceptsFileDrop.value ? 'copy' : 'none'
+}
+function onFileDragLeave(event: DragEvent) {
+  if (!dataTransferHasFiles(event.dataTransfer?.types))
+    return
+  fileDragDepth.value = Math.max(0, fileDragDepth.value - 1)
+}
+useEventListener('drop', () => { fileDragDepth.value = 0 })
+useEventListener('dragend', () => { fileDragDepth.value = 0 })
+function onFileDrop(event: DragEvent) {
+  if (!fileDropEnabled.value || !dataTransferHasFiles(event.dataTransfer?.types))
+    return
+  event.preventDefault()
+  fileDragDepth.value = 0
+  if (!acceptsFileDrop.value)
+    return
+  const files = [...(event.dataTransfer?.files || [])]
+  if (!files.length || !props.uploadFiles || !surface.value)
+    return
+  const point = canvasWorldPoint({ x: event.clientX, y: event.clientY }, surface.value.getBoundingClientRect(), camera)
+  uploadToCanvas(files, (count, occupied) => layoutDroppedFiles(point, count, occupied))
+}
+function viewportCenterPoint() {
+  return { x: (width.value / 2 - camera.x) / camera.zoom, y: (height.value / 2 - camera.y) / camera.zoom }
+}
+function occupiedRects() {
+  return [
+    ...assets.value.flatMap(asset => positions.value.get(asset.id) || []),
+    ...uploadPlaceholders.value.map(item => item.rect),
+  ]
+}
+function uploadToCanvas(files: File[], layout: (count: number, occupied: CanvasRect[]) => CanvasRect[]) {
+  if (!props.uploadFiles)
+    return
+  const slots = new Map<File, { id: string, rect: CanvasRect }>()
+  void props.uploadFiles(files, {
+    accepted(accepted) {
+      const rects = layout(accepted.length, occupiedRects())
+      const added = accepted.map((file, index) => ({ id: crypto.randomUUID(), name: file.name, rect: rects[index]! }))
+      added.forEach((item, index) => slots.set(accepted[index]!, item))
+      uploadPlaceholders.value = [...uploadPlaceholders.value, ...added]
+    },
+    beforeInsert(file, image) {
+      const slot = slots.get(file)
+      if (slot && image.url)
+        reservedDropPositions.set(image.url, slot.rect)
+    },
+    settled(file) {
+      const slot = slots.get(file)
+      if (slot)
+        uploadPlaceholders.value = uploadPlaceholders.value.filter(item => item.id !== slot.id)
+    },
+  }).catch(() => {
+    const ids = new Set([...slots.values()].map(item => item.id))
+    uploadPlaceholders.value = uploadPlaceholders.value.filter(item => !ids.has(item.id))
+  })
+}
+const uploadInput = ref<HTMLInputElement>()
+function openUploadPicker() {
+  if (!acceptsFileDrop.value)
+    return
+  uploadInput.value?.click()
+}
+function onUploadPicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = [...(input.files || [])]
+  input.value = ''
+  if (!files.length || !acceptsFileDrop.value)
+    return
+  const center = viewportCenterPoint()
+  uploadToCanvas(files, (count, occupied) => layoutCenteredFiles(center, count, occupied))
+}
+
+const libraryEnabled = computed(() => Boolean(props.addUrls) && !props.readOnly)
+const librarySheetOpen = ref(false)
+const librarySheetHeight = ref(0)
+const librarySheet = ref<{ saveCanvasAsset: (libraryId: string, asset: CanvasLibraryAsset) => Promise<void> } | null>(null)
+const compactCanvas = useMediaQuery('(max-width: 1023px), (pointer: coarse)')
+function toggleLibrarySheet() {
+  librarySheetOpen.value = !librarySheetOpen.value
+}
+watch(librarySheetOpen, (open) => {
+  if (!open)
+    librarySheetHeight.value = 0
+})
+function placeLibraryAsset(asset: AssetLibraryAssetPublic, client: { x: number, y: number } | null) {
+  if (!props.addUrls || !surface.value || !acceptsFileDrop.value || !asset.url)
+    return
+  const existing = assets.value.find(item => item.url === asset.url)
+  if (existing) {
+    focusAsset(existing.id)
+    toast.info('This asset is already on the canvas')
+    return
+  }
+  const rect = surface.value.getBoundingClientRect()
+  const occupied = occupiedRects()
+  const [slot] = client
+    ? layoutDroppedFiles(canvasWorldPoint(client, rect, camera), 1, occupied)
+    : layoutCenteredFiles(viewportCenterPoint(), 1, occupied)
+  if (!slot)
+    return
+  reservedDropPositions.set(asset.url, slot)
+  void props.addUrls([{ url: asset.url, name: asset.name, kind: asset.kind }], {
+    beforeInsert(image) {
+      if (image.url)
+        reservedDropPositions.set(image.url, slot)
+    },
+  }).then((added) => {
+    if (!added.length)
+      reservedDropPositions.delete(asset.url)
+  }).catch(() => reservedDropPositions.delete(asset.url))
+}
+function sendLibraryAssetToChat(asset: AssetLibraryAssetPublic) {
+  emit('attach', { urls: [asset.url], prompt: asset.name })
+}
+
 let observerReady = false
 let resize: { id: string, pointer: number, corner: CanvasCorner, x: number, y: number, origin: CanvasRect } | undefined
 const corners: CanvasCorner[] = ['nw', 'ne', 'sw', 'se']
@@ -232,11 +420,13 @@ function reconcile() {
   let inserted = 0
   for (const asset of assets.value) {
     if (!next.has(asset.id)) {
-      const existing = asset.url ? urlPositions.get(asset.url) : undefined
+      const existing = asset.url ? urlPositions.get(asset.url) || reservedDropPositions.get(asset.url) : undefined
       const rect = findFreeRect(existing || { x: (inserted % 5) * CELL_X, y: startY + Math.floor(inserted / 5) * CELL_Y, width: CARD_WIDTH, height: CARD_HEIGHT }, occupied)
       next.set(asset.id, rect)
       occupied.push(rect)
       added.push(asset.id)
+      if (asset.url)
+        reservedDropPositions.delete(asset.url)
       if (!existing) {
         inserted++
         nextSlot.value = Math.max(nextSlot.value, startY / CELL_Y * 5 + inserted)
@@ -443,7 +633,10 @@ function down(event: PointerEvent, id?: string) {
   }
   const nodeId = !hand.value && !space.value && event.button === 0 ? id : undefined
   selected.value = nodeId || ''
-  drag = { pointer: event.pointerId, x: event.clientX, y: event.clientY, origin: nodeId ? { ...positions.value.get(nodeId)! } : { x: camera.x, y: camera.y }, id: nodeId }
+  const handoff = Boolean(nodeId)
+    && canvasHandoffEnabled({ showAttach: props.showAttach, readOnly: props.readOnly, pointerType: event.pointerType })
+    && canDragAssetToChat(assets.value.find(asset => asset.id === nodeId))
+  drag = { pointer: event.pointerId, x: event.clientX, y: event.clientY, origin: nodeId ? { ...positions.value.get(nodeId)! } : { x: camera.x, y: camera.y }, id: nodeId, handoff }
 }
 function startResize(event: PointerEvent, id: string, corner: CanvasCorner) {
   if (event.button !== 0 || !ready.value || loadError.value)
@@ -492,6 +685,18 @@ function applyMove() {
   if (Math.abs(dx) + Math.abs(dy) < 3 && !interacting.value)
     return
   interacting.value = true
+  if (drag.id && updateHandoff(pendingMove)) {
+    const current = positions.value.get(drag.id)
+    if (current && (current.x !== drag.origin.x || current.y !== drag.origin.y)) {
+      const restored = { ...current, x: drag.origin.x, y: drag.origin.y }
+      positions.value = new Map(positions.value).set(drag.id, restored)
+      const asset = assets.value.find(item => item.id === drag!.id)
+      if (asset?.url)
+        urlPositions.set(asset.url, restored)
+    }
+    alignmentGuides.value = []
+    return
+  }
   if (drag.id) {
     const proposed = { ...positions.value.get(drag.id)!, x: drag.origin.x + dx / camera.zoom, y: drag.origin.y + dy / camera.zoom }
     const targets = visible.value.filter(asset => asset.id !== drag!.id).map(asset => asset.point)
@@ -542,11 +747,18 @@ function move(event: PointerEvent) {
   if (!frame)
     frame = requestAnimationFrame(applyMove)
 }
-function end() {
+function end(event?: PointerEvent) {
   if (frame)
     cancelAnimationFrame(frame)
   applyMove()
-  const changedId = resize?.id || drag?.id
+  const handoffId = handoffGhost.value && drag?.handoff ? drag.id : undefined
+  const handoffAsset = handoffId && event?.type === 'pointerup' ? assets.value.find(item => item.id === handoffId) : undefined
+  const handoffTarget = handoffAsset && event ? handoffTargetAt(event.clientX, event.clientY, handoffAsset) : null
+  const dropAsset = handoffTarget?.type === 'chat' ? handoffAsset : undefined
+  const libraryDrop = handoffTarget?.type === 'library' && handoffAsset ? { libraryId: handoffTarget.libraryId, asset: toLibraryAsset(handoffAsset) } : undefined
+  if (handoffGhost.value)
+    setHandoff(null)
+  const changedId = resize?.id || (handoffId ? undefined : drag?.id)
   if (changedId && interacting.value)
     markNode(changedId)
   const pointer = marquee.value?.pointer ?? resize?.pointer ?? drag?.pointer
@@ -560,6 +772,12 @@ function end() {
   pendingMove = undefined
   alignmentGuides.value = []
   interacting.value = false
+  if (dropAsset?.url && canDragAssetToChat(dropAsset))
+    emit('attach', { urls: [dropAsset.url], prompt: dropAsset.name || dropAsset.prompt })
+  if (libraryDrop?.asset)
+    void librarySheet.value?.saveCanvasAsset(libraryDrop.libraryId, libraryDrop.asset)
+  else if (libraryDrop)
+    toast.error('Only finished images, videos or audio can be saved to the asset library')
   if (observerReady)
     persist()
 }
@@ -653,9 +871,11 @@ onBeforeUnmount(() => {
     <div
       ref="surface" tabindex="0" role="region" aria-label="Infinite canvas. Drag empty space to select, Shift-click to add selections. Hold Space to pan, drag cards to move. Control or Command scroll to zoom. Press 0 to fit."
       class="canvas-surface absolute inset-0 overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      data-canvas-asset-surface
       :class="hand || space || interacting ? 'cursor-grabbing' : 'cursor-grab'"
       :style="{ backgroundSize: `${24 * camera.zoom}px ${24 * camera.zoom}px`, backgroundPosition: `${camera.x}px ${camera.y}px` }"
-      @pointerdown="down($event)" @pointermove="move" @pointerup="end" @pointercancel="end" @lostpointercapture="end"
+      @dragenter="onFileDragEnter" @dragover="onFileDragOver" @dragleave="onFileDragLeave" @drop="onFileDrop"
+      @pointerdown="down($event)" @pointermove="move" @pointerup="end($event)" @pointercancel="end()" @lostpointercapture="end"
       @wheel.prevent="wheel" @keydown="keydown" @keyup="space = false" @blur="space = false"
     >
       <div class="absolute origin-top-left" :style="{ 'transform': `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`, '--canvas-selection-width': selectionWidth }">
@@ -723,6 +943,19 @@ onBeforeUnmount(() => {
             />
           </template>
         </article>
+        <div
+          v-for="item in uploadPlaceholders" :key="item.id"
+          data-testid="canvas-upload-placeholder"
+          class="pointer-events-none absolute flex items-center justify-center overflow-hidden rounded-xl border border-primary/70 bg-card shadow-sm"
+          :style="{ transform: `translate(${item.rect.x}px, ${item.rect.y}px)`, width: `${item.rect.width}px`, height: `${item.rect.height}px` }"
+          role="status"
+        >
+          <div class="flex w-full min-w-0 flex-col items-center gap-2 px-3 text-center text-muted-foreground" :style="{ fontSize: labelSize }">
+            <Icon name="i-lucide-upload" class="size-5 shrink-0" />
+            <p class="w-full truncate" :title="item.name">{{ item.name }}</p>
+            <p>Uploading…</p>
+          </div>
+        </div>
       </div>
       <svg v-if="alignmentGuides.length" class="pointer-events-none absolute inset-0 z-20 size-full overflow-visible text-sky-400" aria-hidden="true">
         <line
@@ -807,7 +1040,7 @@ onBeforeUnmount(() => {
           <button v-if="asset.url && asset.state === 'success'" class="canvas-action" aria-label="Export original file" :title="exporting ? 'Exporting…' : 'Export original file'" :disabled="exporting" @click="exportAssets([asset], 'file')">
             <Icon :name="exporting ? 'i-lucide-loader-circle' : 'i-lucide-download'" :class="{ 'animate-spin': exporting }" />
           </button>
-          <button v-if="showAttach && asset.url && asset.state === 'success'" class="canvas-action" :aria-label="asset.video ? 'Use as video reference' : asset.audio ? 'Use as voice reference' : asset.document ? 'Use as document reference' : 'Use as reference'" :title="asset.video ? 'Use as video reference' : asset.audio ? 'Use as voice reference' : asset.document ? 'Use as document reference' : 'Use as reference'" @click="emit('attach', { urls: [asset.url], prompt: asset.prompt })">
+          <button v-if="showAttach && asset.url && asset.state === 'success'" class="canvas-action" :aria-label="asset.video ? 'Use as video reference' : asset.audio ? 'Use as voice reference' : asset.document ? 'Use as document reference' : 'Use as reference'" :title="asset.video ? 'Use as video reference' : asset.audio ? 'Use as voice reference' : asset.document ? 'Use as document reference' : 'Use as reference'" @click="emit('attach', { urls: [asset.url], prompt: asset.name || asset.prompt })">
             <Icon name="i-lucide-paperclip" />
           </button>
           <button v-if="showMove && asset.taskId" class="canvas-action" aria-label="Move to project" @click="emit('move', asset.taskId)">
@@ -870,17 +1103,30 @@ onBeforeUnmount(() => {
           Find latest
         </button>
       </div>
-      <div class="pointer-events-auto absolute right-3 bottom-3 left-3 flex flex-wrap items-center justify-between gap-2">
-        <div class="flex items-center gap-1 rounded-xl border border-border bg-background/95 p-1">
-          <button class="canvas-tool" :class="!hand ? 'bg-accent' : ''" aria-label="Select and move objects" :aria-pressed="!hand" @click="hand = false">
+      <div
+        class="pointer-events-auto absolute right-3 left-3 flex flex-wrap items-center justify-between gap-2 transition-[bottom] duration-300 ease-out motion-reduce:transition-none"
+        :style="{ bottom: `${librarySheetOpen && librarySheetHeight ? librarySheetHeight + 8 : 12}px` }"
+      >
+        <div class="canvas-tabs flex items-stretch border border-border bg-background/95" role="toolbar" aria-label="Canvas tools">
+          <button class="canvas-tool canvas-tab" :data-active="!hand" aria-label="Select and move objects" :aria-pressed="!hand" @click="hand = false">
             <Icon name="i-lucide-mouse-pointer-2" />
           </button>
-          <button class="canvas-tool" :class="hand ? 'bg-accent' : ''" aria-label="Pan canvas" :aria-pressed="hand" @click="hand = true">
+          <button class="canvas-tool canvas-tab" :data-active="hand" aria-label="Pan canvas" :aria-pressed="hand" @click="hand = true">
             <Icon name="i-lucide-hand" />
           </button>
-          <button class="canvas-tool" aria-label="Arrange objects by creation order" title="Arrange: oldest first, newest last" @click="arrange">
+          <button class="canvas-tool canvas-tab" aria-label="Arrange objects by creation order" title="Arrange: oldest first, newest last" @click="arrange">
             <Icon name="i-lucide-layout-grid" />
           </button>
+          <template v-if="fileDropEnabled || libraryEnabled">
+            <span class="canvas-tab-divider" aria-hidden="true" />
+            <button v-if="fileDropEnabled" class="canvas-tool canvas-tab" data-testid="canvas-upload-button" aria-label="Upload files to the canvas" title="Upload files" :disabled="!acceptsFileDrop" @click="openUploadPicker">
+              <Icon name="i-lucide-upload" />
+            </button>
+            <button v-if="libraryEnabled" class="canvas-tool canvas-tab" :data-active="librarySheetOpen" data-testid="canvas-library-button" aria-label="Asset library" title="Asset library" :aria-pressed="librarySheetOpen" :aria-expanded="librarySheetOpen" @click="toggleLibrarySheet">
+              <Icon name="i-lucide-library" />
+            </button>
+          </template>
+          <input v-if="fileDropEnabled" ref="uploadInput" type="file" class="hidden" multiple :accept="AGENT_UPLOAD_ACCEPT" data-testid="canvas-upload-input" @change="onUploadPicked">
         </div>
         <div class="flex items-center gap-1 rounded-xl border border-border bg-background/95 p-1">
           <button class="canvas-tool" aria-label="Zoom out" @click="zoom(camera.zoom / 1.2)">
@@ -898,6 +1144,29 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+    <div
+      v-if="fileDropActive"
+      data-testid="canvas-file-drop-zone"
+      class="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5"
+      role="status"
+    >
+      <p class="flex items-center gap-2 rounded-lg bg-background/95 px-3 py-2 text-sm font-medium text-primary shadow-sm">
+        <Icon name="i-lucide-upload" class="size-4" />
+        Drop files to add them to the canvas
+      </p>
+    </div>
+    <AssetLibrarySheet
+      v-if="libraryEnabled"
+      ref="librarySheet"
+      v-model:open="librarySheetOpen"
+      :mobile="compactCanvas"
+      :can-add-to-canvas="acceptsFileDrop"
+      :can-send-to-chat="Boolean(showAttach)"
+      @update:height="librarySheetHeight = $event"
+      @add-to-canvas="placeLibraryAsset"
+      @send-to-chat="sendLibraryAssetToChat"
+    />
+    <AgentLabAssetDragGhost :state="assetDrag" />
   </div>
 </template>
 
@@ -916,4 +1185,10 @@ onBeforeUnmount(() => {
 .canvas-action { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 4px; }
 .canvas-tool:hover, .canvas-action:hover { background: var(--accent); color: var(--foreground); }
 .canvas-tool:focus-visible, .canvas-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.canvas-tool:disabled { opacity: 0.35; cursor: not-allowed; }
+.canvas-tab { width: 36px; height: 34px; border-radius: 0; color: var(--muted-foreground); }
+.canvas-tab + .canvas-tab { border-left: 1px solid var(--border); }
+.canvas-tab[data-active="true"] { background: var(--primary); color: var(--primary-foreground); }
+.canvas-tab[data-active="true"]:hover { background: color-mix(in oklab, var(--primary) 90%, black); color: var(--primary-foreground); }
+.canvas-tab-divider { width: 3px; align-self: stretch; background: var(--border); }
 </style>

@@ -23,6 +23,7 @@ import { isSeedance2AspectRatio, isSeedance2Resolution } from './seedance2'
 import { SKETCH_QUESTIONS } from './sketchBrief'
 import { AGENT_VIDEO_DURATIONS, GPT_IMAGE_2_ASPECT_RATIOS, GPT_IMAGE_2_RESOLUTIONS, SEEDANCE_2_ASPECT_RATIOS, SEEDANCE_2_RESOLUTIONS, UNCERTAIN_FIELDS } from './types'
 import { inspectWebsiteTool } from './websiteInspection'
+import { webSearchTool } from './webSearch'
 
 export const GENERATE_IMAGE_TOOL = 'generate_image'
 export const REMOVE_BACKGROUND_TOOL = 'remove_background'
@@ -41,6 +42,7 @@ export const MAX_ASK_QUESTIONS = 6
 export const MAX_ASK_OPTIONS = 8
 
 export const openAiTools = [
+  webSearchTool,
   inspectWebsiteTool,
   exportZipTool,
   measureVideoDurationTool,
@@ -114,7 +116,7 @@ export const openAiTools = [
     type: 'function',
     function: {
       name: GENERATE_VIDEO_TOOL,
-      description: 'Generate one video. Use first_frame to animate ONE still (image-to-video). Use reference_images / reference_videos for reference-to-video: compose a new clip from several references, or edit an existing clip by putting it in reference_videos and describing the change in the prompt (optional reference_images to replace a person or object). If several stills are attached without a pointed first frame, prefer reference-to-video. Omit both only for text-to-video. Call once per video. The runtime picks the video family from the quality preference. A confirmation card is always recorded; generation may auto-approve from the user\'s generation confirmation.',
+      description: 'Generate one video, only after the video model card and the duration/resolution card have been answered. Call ask_user first with videoRequest set from your reading of the user; the runtime lists currently registered models and marks the cheapest suitable one Recommended, then defaults duration and resolution to the cheapest tier. Several separate videos in one request (videoRequest.clipCount) share those cards; call generate_video once per clip afterward. Use first_frame to animate ONE still. Use reference_images / reference_videos for reference-to-video. Omit both only for text-to-video. A confirmation card is still recorded; Automatic mode only skips that confirmation.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -197,7 +199,7 @@ export const openAiTools = [
     type: 'function',
     function: {
       name: ASK_USER_TOOL,
-      description: 'Show clickable choice cards in chat when you need a discrete pick (style, ratio, character, confirm a plan, yes/no). Do not list the options in markdown — the card shows them. Skip is always on the card so they can let you decide. Always include an Other option with allow_custom: true for every question so the user can type their own answer. Do not mix with generation tools or concat_videos in the same turn. After they answer, continue from the tool result.',
+      description: 'Show clickable choice cards. For a new video, call this alone with videoRequest filled from your reading of the user before generate_video. The runtime replaces video questions with a live model card (cheapest suitable model is Recommended) and then a duration/resolution card that defaults to the cheapest tier. Do not invent model names or prices. Several clips share one card via videoRequest.clipCount. Other questions (style, plan, yes/no) stay as you wrote them. Skip lets you decide. One question is shown at a time when there are several. Do not mix with generation tools. Cancel stops the run.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -210,9 +212,27 @@ export const openAiTools = [
             type: 'string',
             description: 'In the user\'s preferred language, what you will do if they skip. Shown as a hint on the card.',
           },
+          videoRequest: {
+            type: 'object',
+            description: 'Required on the first ask_user of a video generation. Your reading of the user, not a keyword match. The runtime builds the model and parameter cards from this.',
+            properties: {
+              requestKind: { type: 'string', enum: ['new', 'extend', 'redo', 'modify', 'finalize'] },
+              structure: { type: 'string', enum: ['continuous', 'storyboard', 'conflict'], description: 'Set only when the user addressed cuts vs one take. conflict means they asked for both.' },
+              referenceMedia: { type: 'string', enum: ['none', 'image', 'video', 'image_and_video', 'audio', 'unclear'] },
+              seamlessLoop: { type: 'boolean' },
+              firstFrame: { type: 'boolean' },
+              totalDurationSeconds: { type: 'number', description: 'Only when the user specified a length.' },
+              resolution: { type: 'string', description: 'Only when the user specified a resolution.' },
+              aspectRatio: { type: 'string', description: 'Only when the user specified an aspect ratio.' },
+              modelId: { type: 'string', description: 'Only a registered video model the user named. Never a skill default.' },
+              clipCount: { type: 'integer', description: 'Several separate videos that share one model and parameter card.' },
+              sourceImageUrls: { type: 'array', items: { type: 'string' }, description: 'Exact URLs of stills the user already supplied for this request.' },
+            },
+            required: ['requestKind'],
+          },
           questions: {
             type: 'array',
-            description: 'One or more related questions. Prefer one call with several questions over several calls.',
+            description: 'One or more related questions. For video, a placeholder question is replaced by the runtime cards.',
             items: {
               type: 'object',
               additionalProperties: false,
@@ -953,14 +973,25 @@ export function parseAskUserArgs(raw: string): AskUserArgs {
     if (question)
       questions.push(question)
   }
-  if (!questions.length)
-    throw new Error('ask_user needs at least one question with options')
+  if (!questions.length) {
+    if (!parsed.videoRequest || typeof parsed.videoRequest !== 'object')
+      throw new Error('ask_user needs at least one question with options')
+    questions.push({
+      id: 'video_pending',
+      prompt: 'Choose the video settings.',
+      options: [{ id: 'continue', label: 'Continue' }],
+    })
+  }
 
   const hasExit = questions.some(question => question.id === 'exit_skill_creator')
   const topPrompt = clipAsk(parsed.prompt ?? parsed.intro, 2000)
+  const videoRequest = parsed.videoRequest && typeof parsed.videoRequest === 'object'
+    ? parsed.videoRequest as AskUserArgs['videoRequest']
+    : undefined
   return {
     prompt: hasExit ? (rewritePublishWording(topPrompt) || 'The update is ready to save.') : topPrompt,
     recommendation: questions.find(question => question.id === 'image_edit_method' || question.id === 'object_removal_method')?.options.find(option => option.id === 'annotate')?.label ?? clipAsk(parsed.recommendation ?? parsed.hint, 400),
     questions: standaloneImageEditQuestions(questions),
+    ...(videoRequest ? { videoRequest } : {}),
   }
 }

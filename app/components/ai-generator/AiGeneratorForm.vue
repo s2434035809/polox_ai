@@ -20,7 +20,8 @@ const emit = defineEmits<{
   ]
 }>()
 const route = useRoute()
-const { projects, selectedProjectId, createProject } = useProjects()
+const { studioProjects, selectedProjectId, createProject, selectStudioProject } = useProjects()
+onMounted(() => { selectStudioProject() })
 const { availableModels, selectedModelId, selectedModel, formValues, uploadFields, itemsForField, primaryFields, toolbarFields, advancedFields, canGenerate, isUploading, isSubmitting, setFieldValue, addUploadedFiles, removeUploadedItem, handleGenerate } = useAiGeneratorForm()
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const activeUploadField = ref('')
@@ -194,7 +195,7 @@ watch(lockedProjectId, (id) => {
             </DropdownMenu>
 
             <DropdownMenu
-              v-if="!agentHandoff && isHome && projects.length"
+              v-if="!agentHandoff && isHome && studioProjects.length"
               :modal="false"
             >
               <DropdownMenuTrigger as-child>
@@ -204,7 +205,7 @@ watch(lockedProjectId, (id) => {
                   class="h-8 gap-1.5 border-border bg-muted/45 px-2.5 text-xs shadow-none hover:bg-accent"
                 >
                   <Folder class="size-3.5" />
-                  {{ projects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
+                  {{ studioProjects.find(project => project.id === selectedProjectId)?.name || DEFAULT_PROJECT_NAME }}
                   <ChevronDown class="size-3.5 opacity-50" />
                 </Button>
               </DropdownMenuTrigger>
@@ -219,7 +220,7 @@ watch(lockedProjectId, (id) => {
                     @update:model-value="onProjectChange"
                   >
                     <DropdownMenuRadioItem
-                      v-for="project in projects"
+                      v-for="project in studioProjects"
                       :key="project.id"
                       :value="project.id"
                     >

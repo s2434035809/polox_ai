@@ -15,6 +15,8 @@ import { readErrorMessage } from '~~/shared/utils/apiError'
 import { gptImage2ComboError } from '~~/shared/utils/gptImage2'
 import { isMediaAudioUrl, isMediaDocumentUrl, isMediaVideoUrl } from '~~/shared/utils/seedance25'
 import { confirmationMedia, reconcileConfirmationStates } from '~/utils/agentConfirmationState'
+import { planAgentUploads, type AgentUploadKind } from '~/utils/agentUploadRules'
+import { onPagePause, onPageResume, pageLifecycleSignal } from '~/utils/pageLifecycle'
 
 export type { AgentConfirmPolicy, AgentQuality }
 export type AgentStatus = 'idle' | 'thinking' | 'calling_tool' | 'generating' | 'queued'
@@ -181,7 +183,7 @@ export interface AgentChatMessage {
   confirmationState?: 'pending' | 'confirmed' | 'cancelled' | 'blocked'
   resolvedParams?: ConfirmationPayload['params']
   choice?: ChoicePayload
-  choiceState?: 'pending' | 'answered' | 'skipped'
+  choiceState?: 'pending' | 'answered' | 'skipped' | 'cancelled'
   choiceAnswers?: ChoiceAnswer[]
 }
 interface AgentEvent {
@@ -432,6 +434,26 @@ function isAgentDocumentFile(file: File) {
     return true
   return (!type || type === 'application/octet-stream') && AGENT_DOCUMENT_EXT.test(file.name)
 }
+
+/** Same classification (and precedence) as attachFiles: audio, video, document, then still. */
+function agentUploadKind(file: File): AgentUploadKind | null {
+  if (isAgentAudioFile(file))
+    return 'audio'
+  if (isAgentVideoFile(file))
+    return 'video'
+  if (isAgentDocumentFile(file))
+    return 'document'
+  if (isAgentImageFile(file))
+    return 'image'
+  return null
+}
+
+/** Callbacks the canvas uses to show upload placeholders and place finished cards. */
+export interface CanvasUploadHooks {
+  accepted?: (files: File[]) => void
+  beforeInsert?: (file: File, image: AgentImage) => void
+  settled?: (file: File, ok: boolean) => void
+}
 export function useAgentLab(options?: {
   projectId?: MaybeRefOrGetter<string>
   onJobs?: (jobs: GenerationJobPublic[]) => void
@@ -528,15 +550,12 @@ function createAgentLab(options?: {
   const waitingForUserChoice = computed(() => Boolean(choice.value))
   const waitingForUser = computed(() => waitingForUserConfirm.value || waitingForUserChoice.value)
   const uploadingSketch = ref(false)
+  const canvasUploads = ref(0)
+  // OSS has no admin read-only canvas. Kept as a free binding so canvas uploads can be disabled the same way.
+  const readOnly = false
   const attaching = computed(() => uploadingSketch.value || attachments.value.some(item => item.status === 'uploading'))
   const readyAttachments = computed(() => attachments.value.filter(item => item.status === 'ready' && item.url))
-  const canSwitchAgent = computed(() => {
-    if (attaching.value)
-      return false
-    if (status.value === 'thinking' || status.value === 'calling_tool')
-      return false
-    return true
-  })
+  const canSwitchAgent = computed(() => !(attaching.value || canvasUploads.value > 0))
   const canCreateAgent = computed(() => canSwitchAgent.value)
   const agents = computed<AgentListItem[]>(() => [...storedAgents.value].sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0)).map((agent) => {
     const active = agent.id === activeAgentId.value
@@ -1470,7 +1489,7 @@ function createAgentLab(options?: {
         const message = messages.value.find(item => item.choice?.id === pendingCard.id)
         if (message) {
           message.choice = pendingCard
-          if ((!data.busy && activeTurns === 0) || (message.choiceState !== 'answered' && message.choiceState !== 'skipped'))
+          if (message.choiceState !== 'cancelled' && ((!data.busy && activeTurns === 0) || (message.choiceState !== 'answered' && message.choiceState !== 'skipped')))
             message.choiceState = 'pending'
         }
         else if (!messages.value.some(item => item.choice?.id === pendingCard.id)) {
@@ -1873,7 +1892,7 @@ function createAgentLab(options?: {
   }
   async function ping() {
     try {
-      const response = await fetch(`${baseUrl}/health`, { credentials: 'omit' })
+      const response = await fetch(`${baseUrl}/health`, { credentials: 'omit', signal: pageLifecycleSignal() })
       online.value = response.ok
     }
     catch {
@@ -2001,7 +2020,7 @@ function createAgentLab(options?: {
       return
     }
     clearLabError()
-    const id = await ensureSession()
+    const uploads: Array<{ file: File, local: PendingAttachment }> = []
     for (const file of accepted) {
       const audio = isAgentAudioFile(file)
       const video = !audio && isAgentVideoFile(file)
@@ -2026,7 +2045,13 @@ function createAgentLab(options?: {
         error: '',
         kind: audio ? 'audio' : video ? 'video' : document ? 'document' : 'image',
       }
-      attachments.value = [...attachments.value, local]
+      uploads.push({ file, local })
+    }
+    if (!uploads.length)
+      return
+    attachments.value = [...attachments.value, ...uploads.map(upload => upload.local)]
+    const id = await ensureSession()
+    for (const { file, local } of uploads) {
       try {
         const body = new FormData()
         body.append('file', file)
@@ -2073,6 +2098,99 @@ function createAgentLab(options?: {
       }
     }
   }
+  /**
+   * Upload files dropped on the project canvas as canvas assets. Same /v1/uploads
+   * endpoint, types and size limits as chat attachments, but never the pending attachment list.
+   */
+  async function uploadCanvasFiles(fileList: File[], hooks: CanvasUploadHooks = {}) {
+    if (readOnly)
+      return
+    const plan = planAgentUploads(fileList, agentUploadKind)
+    if (plan.errors.length)
+      setLabError(plan.errors.at(-1)!)
+    else
+      clearLabError()
+    if (!plan.accepted.length)
+      return
+    const files = plan.accepted.map(item => item.file)
+    hooks.accepted?.(files)
+    canvasUploads.value += files.length
+    const session = ensureSession()
+    session.catch(() => {})
+    let uploaded = 0
+    await Promise.all(files.map(async (file) => {
+      let ok = false
+      try {
+        const id = await session
+        const body = new FormData()
+        body.append('file', file)
+        const response = await fetch(`${baseUrl}/v1/uploads?sessionId=${encodeURIComponent(id)}`, {
+          method: 'POST',
+          credentials: 'omit',
+          headers: labHeaders(false, crypto.randomUUID()),
+          body,
+        })
+        const payload = await response.json().catch(() => ({})) as { sessionId?: string, image?: AgentImage, error?: string }
+        if (!response.ok || !payload.image?.url)
+          throw new Error(payload.error || 'Upload failed')
+        if (payload.sessionId)
+          sessionId.value = payload.sessionId
+        const image = payload.image
+        hooks.beforeInsert?.(file, image)
+        images.value = [image, ...images.value.filter(item => item.id !== image.id)]
+        ok = true
+        uploaded++
+      }
+      catch (err) {
+        setLabError(err instanceof Error && err.message ? err.message : 'Upload failed')
+      }
+      finally {
+        canvasUploads.value = Math.max(0, canvasUploads.value - 1)
+        hooks.settled?.(file, ok)
+      }
+    }))
+    if (uploaded)
+      await persistChat().catch(() => {})
+  }
+
+  /**
+   * Place already-hosted media (an asset-library item dragged out of the canvas drawer)
+   * on the project canvas. Same media list as uploadCanvasFiles, without re-uploading
+   * and without touching pending chat attachments. Returns the URLs added.
+   */
+  async function addCanvasUrls(items: Array<{ url: string, name?: string, kind?: 'image' | 'video' | 'audio' }>, hooks: { beforeInsert?: (image: AgentImage) => void } = {}) {
+    if (readOnly)
+      return [] as string[]
+    const known = new Set<string>()
+    const added: string[] = []
+    for (const item of items) {
+      const url = String(item.url || '').trim()
+      if (!/^https?:\/\//i.test(url) || known.has(url))
+        continue
+      known.add(url)
+      const audio = item.kind === 'audio' || isMediaAudioUrl(url)
+      const video = !audio && (item.kind === 'video' || isMediaVideoUrl(url))
+      const name = String(item.name || '').trim() || (audio ? 'Audio' : video ? 'Video' : 'Image')
+      const image: AgentImage = {
+        id: crypto.randomUUID(),
+        kind: audio ? 'audio' : video ? 'video' : 'upload',
+        status: 'success',
+        name,
+        prompt: name,
+        aspectRatio: 'auto',
+        resolution: '',
+        url,
+        error: '',
+      }
+      hooks.beforeInsert?.(image)
+      images.value = [image, ...images.value]
+      added.push(url)
+    }
+    if (added.length)
+      await persistChat().catch(() => {})
+    return added
+  }
+
   /** Transcript-only: Skill Creator markers, ignoring the current title. */
     function agentTranscriptLooksLikeSkillEdit(agent: StoredAgent) {
       const messages = agent.messages || []
@@ -2250,7 +2368,7 @@ function createAgentLab(options?: {
     }
   }
 
-  async function sendMessage(options?: { newAgent?: boolean, sketchFile?: File, lockedSkillIds?: string[] }): Promise<boolean> {
+  async function sendMessage(options?: { newAgent?: boolean, sketchFile?: File, lockedSkillIds?: string[], enforceLockedSkill?: boolean }): Promise<boolean> {
     if (options?.sketchFile) {
       if (pending.value || waitingForUser.value || attaching.value || status.value === 'generating' || status.value === 'queued')
         return false
@@ -2340,7 +2458,8 @@ function createAgentLab(options?: {
     draft.value = ''
     clearComposerDraft()
     const imageIds = ready.map(item => item.imageId).filter((id): id is string => Boolean(id))
-    const urls = ready.map(item => item.url)
+    const outboundAttachments = ready.map(item => ({ url: item.url, name: item.name || '' }))
+    const urls = outboundAttachments.map(item => item.url)
     attachments.value.forEach(revokePreview)
     attachments.value = []
     messages.value.push({
@@ -2355,10 +2474,10 @@ function createAgentLab(options?: {
     const epoch = streamEpoch
     const runAgentId = activeAgentId.value
     writeStore()
-    void runAgentTurn(epoch, runAgentId, outbound, urls)
+    void runAgentTurn(epoch, runAgentId, outbound, outboundAttachments, options?.enforceLockedSkill ? lockedIds[0] : undefined)
     return true
   }
-  async function stopAgent() {
+  async function stopAgent(options?: { cancelledChoiceId?: string }) {
     if (!sessionId.value || stopping.value)
       return false
     if (!pending.value && status.value === 'idle')
@@ -2369,7 +2488,7 @@ function createAgentLab(options?: {
         method: 'POST',
         credentials: 'omit',
         headers: labHeaders(true, crypto.randomUUID()),
-        body: '{}',
+        body: JSON.stringify(options?.cancelledChoiceId ? { cancelledChoiceId: options.cancelledChoiceId } : {}),
       })
       if (!response.ok) {
         const text = await parseError(response).catch(() => `Stop failed (${response.status})`)
@@ -2399,7 +2518,7 @@ function createAgentLab(options?: {
         const open = choice.value
         const message = messages.value.find(item => item.choice?.id === open.id)
         if (message && message.choiceState === 'pending')
-          message.choiceState = 'skipped'
+          message.choiceState = options?.cancelledChoiceId ? 'cancelled' : 'skipped'
         choice.value = null
       }
       await hydrateServer().catch(() => { })
@@ -2411,7 +2530,9 @@ function createAgentLab(options?: {
       return false
     }
   }
-  async function runAgentTurn(epoch: number, runAgentId: string, text: string, urls: string[]) {
+    const REATTACHING_NOTICE = 'The connection was interrupted. Still working on it...'
+  const RETRY_NOTICE = 'The response was interrupted. Tap Retry to continue.'
+  async function runAgentTurn(epoch: number, runAgentId: string, text: string, urls: Array<string | { url: string, name?: string }>, lockedSkill?: string) {
     activeTurns += 1
     try {
       let locked = false
@@ -2421,11 +2542,13 @@ function createAgentLab(options?: {
           method: 'POST',
           credentials: 'omit',
           headers: labHeaders(true, crypto.randomUUID()),
+          signal: pageLifecycleSignal(),
           body: JSON.stringify({
             sessionId: sessionId.value || undefined,
             message: text,
             attachments: urls,
             confirmPolicy: confirmPolicy.value,
+            ...(lockedSkill ? { lockedSkill } : {}),
             ...agentContextSnapshot(),
           }),
         })
@@ -2451,12 +2574,9 @@ function createAgentLab(options?: {
       if (epoch !== streamEpoch)
         return
       if (isDisconnectError(err) || (err instanceof Error && (err.name === 'AbortError' || err.message === 'This operation was aborted'))) {
-        setLabError(agentRecoveryNotice(err instanceof Error ? err.message : String(err)))
-        // Browser can drop mid-SSE; recover pending confirm and start generation server-side.
-        await hydrateServer().catch(() => { })
-        await maybeAutoApprove().catch(() => { })
-        scheduleAutoApproveRetry(800)
-        scheduleAutoApproveRetry(2500)
+        if (activeAgentId.value === runAgentId)
+          error.value = REATTACHING_NOTICE
+        await reattachInterruptedTurn(epoch, runAgentId)
         return
       }
       const text = err instanceof Error ? err.message : 'Failed to reach the agent runtime'
@@ -2507,6 +2627,71 @@ function createAgentLab(options?: {
       }
     }
   }
+  async function reattachInterruptedTurn(epoch: number, agentId: string) {
+    if (activeAgentId.value !== agentId)
+      return
+    let started = Date.now()
+    let attempt = 0
+    let idleChecks = 0
+    const initialTranscript = messages.value.map(item => `${item.id}:${item.content}`).join('|')
+    while (epoch === streamEpoch && agentId === activeAgentId.value && Date.now() - started < 180_000) {
+      if (import.meta.client && document.hidden) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        started += 1000
+        continue
+      }
+      const remote = await hydrateServer().catch(() => ({ busy: false, hasPendingConfirm: false }))
+      await maybeAutoApprove().catch(() => { })
+      if (waitingForUser.value) {
+        if (error.value === REATTACHING_NOTICE)
+          error.value = ''
+        return
+      }
+      const transcript = messages.value.map(item => `${item.id}:${item.content}`).join('|')
+      if (!remote?.busy && transcript !== initialTranscript) {
+        if (error.value === REATTACHING_NOTICE)
+          error.value = ''
+        return
+      }
+      idleChecks = !remote?.busy ? idleChecks + 1 : 0
+      if (idleChecks >= 3)
+        break
+      if (error.value !== REATTACHING_NOTICE)
+        error.value = REATTACHING_NOTICE
+      attempt++
+      await new Promise(resolve => setTimeout(resolve, Math.min(5000, 1000 * 1.5 ** attempt)))
+    }
+    if (epoch === streamEpoch && agentId === activeAgentId.value && error.value === REATTACHING_NOTICE) {
+      error.value = RETRY_NOTICE
+      pending.value = waitingForUser.value || images.value.some(item => item.status === 'generating')
+      if (!pending.value && status.value !== 'generating')
+        status.value = 'idle'
+    }
+  }
+  async function retryInterruptedTurn() {
+    if (!error.value.startsWith('The response was interrupted') || pending.value)
+      return false
+    draft.value = 'Continue the previous request from the last completed step. Do not repeat completed tool calls.'
+    error.value = ''
+    return sendMessage()
+  }
+  async function cancelChoice(choiceId?: string) {
+    const id = choiceId || choice.value?.id
+    if (!id)
+      return stopAgent()
+    const message = messages.value.find(item => item.choice?.id === id)
+    const previous = message?.choiceState
+    if (message && (message.choiceState || 'pending') === 'pending')
+      message.choiceState = 'cancelled'
+    const stopped = await stopAgent({ cancelledChoiceId: id })
+    if (!stopped && message && message.choiceState === 'cancelled') {
+      message.choiceState = previous || 'pending'
+      if (message.choice && !choice.value)
+        choice.value = message.choice
+    }
+    return stopped
+  }
+
   function shouldAutoApprove(payload: ConfirmationPayload | null) {
     if (!payload)
       return false
@@ -3352,11 +3537,30 @@ function createAgentLab(options?: {
       void hydrate()
     })
     if (import.meta.client) {
-      useEventListener(document, 'visibilitychange', () => {
-        if (document.visibilityState !== 'hidden')
-          return
+      // Backgrounding aborts in-flight fetches (a wedged socket otherwise freezes iOS on return).
+      // Resume refreshes health and the open session instead of waiting on the dead request.
+      const stopPause = onPagePause(() => {
+        if (healthTimer) {
+          clearInterval(healthTimer)
+          healthTimer = undefined
+        }
+        if (saveTimer)
+          clearTimeout(saveTimer)
+        if (persistTimer)
+          clearTimeout(persistTimer)
+        writeStore()
+      })
+      const stopResume = onPageResume(() => {
+        if (!healthTimer)
+          healthTimer = setInterval(ping, 10000)
+        void ping()
+        void hydrateServer().catch(() => {})
         writeStore()
         void persistChat()
+      })
+      onScopeDispose(() => {
+        stopPause()
+        stopResume()
       })
     }
     watch([sessionId, messages, images, confirmation, choice, draft, agentTitle, status, pending, queueNotice], () => {
@@ -3444,11 +3648,15 @@ function createAgentLab(options?: {
     stopAgent,
     stopping,
     attachFiles,
+    uploadCanvasFiles,
+    addCanvasUrls,
     uploadAnnotationImage,
     attachUrls,
     removeAttachment,
     resolveConfirmation,
     resolveChoice,
+    cancelChoice,
+    retryInterruptedTurn,
     bindOptions,
     ensureHydrated,
     flush,
