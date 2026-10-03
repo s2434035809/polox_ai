@@ -5,6 +5,13 @@
 <h1 align="center">PoloX AI — Agent 驱动的多模态生成工作台</h1>
 
 <p align="center">
+  <a href="https://youtu.be/DX7ayRiIjKo">
+    <img src="https://img.youtube.com/vi/DX7ayRiIjKo/maxresdefault.jpg" alt="PoloX AI 演示视频" width="720" />
+  </a>
+</p>
+
+
+<p align="center">
   生成、编辑与修改，无需手动操作生成器；用聊天搞定一切，结果呈现在无限画布上。
 </p>
 

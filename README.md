@@ -5,6 +5,13 @@
 <h1 align="center">PoloX AI — Agent-Powered Multimodal Creation Workbench</h1>
 
 <p align="center">
+  <a href="https://youtu.be/DX7ayRiIjKo">
+    <img src="https://img.youtube.com/vi/DX7ayRiIjKo/maxresdefault.jpg" alt="PoloX AI demo video" width="720" />
+  </a>
+</p>
+
+
+<p align="center">
   Generate, edit, and refine without operating generators by hand — chat through everything, and see the results on an infinite canvas.
 </p>
 
